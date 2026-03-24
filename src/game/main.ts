@@ -12,7 +12,13 @@ const config: Phaser.Types.Core.GameConfig = {
     width: 1024,
     height: 768,
     parent: 'game-container',
-    backgroundColor: '#028af8',
+    backgroundColor: '#2d2d2d',
+    physics: {
+        default: 'arcade',
+        arcade: {
+            debug: false // Mude para true se quiser ver as caixas de colisão
+        }
+    },
     scene: [
         Boot,
         Preloader,

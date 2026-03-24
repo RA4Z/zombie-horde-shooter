@@ -1,0 +1,23 @@
+/* Reseta as margens do navegador */
+margin, body, #root, #app {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden; /* Impede barras de rolagem */
+    background-color: #000;
+}
+
+/* Faz o container do Phaser ocupar tudo */
+#game-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* Garante que o canvas não tenha espaços estranhos */
+canvas {
+    display: block;
+}
