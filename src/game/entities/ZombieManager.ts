@@ -40,12 +40,9 @@ export class ZombieManager {
     }
 
     updateHost(players: { id: string, x: number, y: number }[]) {
+        if (players.length === 0) return;
         this.zombiesMap.forEach((zombie, _id) => {
-            if (players.length === 0) return;
 
-            // 1. "DESCONVERTER" a posição do zumbi (Tela -> Mundo Real)
-            // No isométrico: xIso = x - y | yIso = (x + y) / 2
-            // Inverso: xReal = yIso + xIso/2 | yReal = yIso - xIso/2
             const zWorldX = (zombie.y + zombie.x / 2);
             const zWorldY = (zombie.y - zombie.x / 2);
 

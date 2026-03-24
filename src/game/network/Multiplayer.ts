@@ -6,6 +6,7 @@ export class MultiplayerService {
     private connections: Map<string, DataConnection> = new Map();
     public isHost: boolean = false;
     public myID: string = "";
+    public allPeers: string[] = [];
 
     constructor() {
         // Inicializa o Peer (usa o servidor público da PeerJS apenas para "encontrar" os players)
@@ -39,32 +40,42 @@ export class MultiplayerService {
         this.setupConnection(conn);
     }
 
+    private updatePeerList() {
+        // Pega seu próprio ID + IDs dos outros e coloca em ordem alfabética
+        this.allPeers = [this.myID, ...Array.from(this.connections.keys())].sort();
+    }
+
+    getNextHostID() {
+        return this.allPeers[0]; // O primeiro da lista ordenada
+    }
+
+    removePeer(id: string) {
+        this.connections.delete(id);
+        this.allPeers = [this.myID, ...Array.from(this.connections.keys())].sort();
+    }
+
     private setupConnection(conn: DataConnection) {
         conn.on('open', () => {
             this.connections.set(conn.peer, conn);
-            console.log("Conectado a:", conn.peer);
+            this.updatePeerList();
+            console.log("P2P: Conexão aberta com o Host!");
+            if (!this.isHost) {
+                EventBus.emit('room-joined', conn.peer);
+            }
+        });
 
-            // Se for cliente, avisa o React que entrou
-            if (!this.isHost) EventBus.emit('room-joined', conn.peer);
+        // ESTE É O EVENTO CRÍTICO: Quando qualquer player fecha a aba
+        conn.on('close', () => {
+            console.log("Player saiu da rede:", conn.peer);
+            this.removePeer(conn.peer); // Remove da lista de sucessão
+            EventBus.emit('peer-disconnected', conn.peer); // Avisa o Phaser para limpar a tela
         });
 
         conn.on('data', (data: any) => {
-            // Repassa os dados recebidos para a cena do Phaser
             EventBus.emit('network-data', { from: conn.peer, data });
         });
-        
-        conn.on('close', () => {
-            console.log("Conexão perdida com:", conn.peer);
-            this.connections.delete(conn.peer); // Remove da lista de conexões
-            EventBus.emit('peer-disconnected', conn.peer); // Avisa o Phaser
-        });
-
-        conn.on('error', (err) => {
-            console.error("Erro na conexão Peer:", err);
-            this.connections.delete(conn.peer);
-            EventBus.emit('peer-disconnected', conn.peer);
-        });
     }
+
 
     // Envia dados para todos (se for Host) ou para o Host (se for Cliente)
     broadcast(type: string, payload: any) {

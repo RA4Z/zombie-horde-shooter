@@ -9,11 +9,13 @@ export default function App() {
     const [roomKey, setRoomKey] = useState("");
 
     useEffect(() => {
-        // Escuta quando o jogo CONECTAR de fato
-        EventBus.on('room-joined', (key: string) => {
-            setGameStarted(true); // Só mostra o HUD quando a sala existir
+        const onRoomJoined = (key: string) => {
+            console.log("React: Sala/Conexão estabelecida!", key);
+            setGameStarted(true); // <--- ESCONDE O MENU
             setRoomKey(key);
-        });
+        };
+
+        EventBus.on('room-joined', onRoomJoined);
 
         EventBus.on('player-stats', (data: any) => {
             setHp(data.hp);
@@ -49,36 +51,33 @@ export default function App() {
     );
 }
 
-// Mantenha a sua função MainMenuUI aqui embaixo ou em outro arquivo
 function MainMenuUI() {
     const [joinKey, setJoinKey] = useState("");
+    const [loading, setLoading] = useState(false); // <--- ESTADO DE CARREGAMENTO
 
     const startAsHost = () => {
-        // Envia evento para o Phaser avisando que queremos ser HOST
+        setLoading(true);
         EventBus.emit('start-game', { isHost: true });
     };
 
     const joinAsGuest = () => {
+        setLoading(true);
         EventBus.emit('start-game', { isHost: false, roomId: joinKey });
     };
 
     return (
-        <div style={{
-            position: 'absolute', zIndex: 20, top: '50%', left: '50%',
-            transform: 'translate(-50%, -50%)', background: '#111',
-            padding: '40px', border: '2px solid green', color: 'white', textAlign: 'center'
-        }}>
-            <h1>ZOMBIES MULTIPLAYER</h1>
-            <button onClick={startAsHost} style={{ padding: '10px 20px', cursor: 'pointer' }}>CRIAR SALA (HOST)</button>
-            <div style={{ margin: '20px 0' }}>OU</div>
-            <input
-                value={joinKey}
-                onChange={e => setJoinKey(e.target.value)}
-                placeholder="Cole a chave aqui"
-                style={{ padding: '10px', width: '200px' }}
-            />
-            <br /><br />
-            <button onClick={joinAsGuest} style={{ padding: '10px 20px', cursor: 'pointer' }}>ENTRAR NA SESSÃO</button>
+        <div className="menu">
+            {loading ? (
+                <h2>Conectando...</h2>
+            ) : (
+                <>
+                    <h1>ZOMBIES MULTIPLAYER</h1>
+                    <button onClick={startAsHost}>CRIAR SALA (HOST)</button>
+                    <hr />
+                    <input value={joinKey} onChange={e => setJoinKey(e.target.value)} placeholder="Chave do Host" />
+                    <button onClick={joinAsGuest}>ENTRAR NA SESSÃO</button>
+                </>
+            )}
         </div>
     );
 }

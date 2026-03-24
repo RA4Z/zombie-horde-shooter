@@ -14,6 +14,10 @@ export class Game extends Scene {
     lastDamageTime: number = 0;
     lastRemoteData: Map<string, { x: number, y: number }> = new Map();
     private heartbeatWorker: Worker | null = null;
+    hostID_atual: string = "";
+    private lastHostHeartbeat: number = 0;
+    private migrationThreshold: number = 3000;
+    lastSeenMap: Map<string, number> = new Map();
     wasd: any;
 
     playerData = { x: 0, y: 0, speed: 250, hp: 100 };
@@ -23,6 +27,9 @@ export class Game extends Scene {
     }
 
     create() {
+        window.addEventListener('beforeunload', () => {
+            this.multiplayer.broadcast('player-leaving', { id: this.multiplayer.myID });
+        });
         this.sound.pauseOnBlur = false;
         this.game.events.removeAllListeners('blur');
         this.game.events.removeAllListeners('focus');
@@ -61,11 +68,21 @@ export class Game extends Scene {
         // 1. ESCUTAR COMANDO DO REACT PARA INICIAR
         EventBus.on('start-game', async (data: { isHost: boolean, roomId?: string }) => {
             this.isHost = data.isHost;
+
+            // Marcar o tempo inicial para não dar erro de host morto
+            this.lastHostHeartbeat = this.time.now;
+
             if (this.isHost) {
                 const key = await this.multiplayer.hostGame();
-                EventBus.emit('room-joined', key);
+                this.hostID_atual = this.multiplayer.myID;
+                this.startHostHeartbeat();
+                EventBus.emit('room-joined', key); // Avisa o React (Host)
             } else if (data.roomId) {
+                console.log("Tentando conectar ao Host:", data.roomId);
                 await this.multiplayer.joinGame(data.roomId);
+                this.hostID_atual = data.roomId;
+                // O EventBus.emit('room-joined') será chamado automaticamente 
+                // pelo Multiplayer.ts assim que a conexão abrir!
             }
         });
         this.physics.add.overlap(this.bullets, this.zombies.group, (bullet: any, zombie: any) => {
@@ -126,11 +143,24 @@ export class Game extends Scene {
         this.multiplayer.broadcast('zombie-spawn', { id, x, y });
     }
 
-    // No setupNetworkEvents, adicione os novos casos
     setupNetworkEvents() {
         EventBus.on('network-data', ({ from, data }: any) => {
+            this.lastSeenMap.set(from, this.time.now);
             const msg = JSON.parse(data);
 
+            if (from === this.hostID_atual) {
+                this.lastHostHeartbeat = this.time.now;
+            }
+
+            if (msg.type === 'host-migration-start') {
+                this.hostID_atual = msg.newHostID; // Muda quem eu devo ouvir
+                this.lastHostHeartbeat = this.time.now;
+                console.log("Sessão migrada para o novo Host:", msg.newHostID);
+            }
+
+            if (msg.type === 'player-leaving') {
+                this.removeGhostPlayer(from);
+            }
             if (msg.type === 'move') {
                 this.lastRemoteData.set(from, { x: msg.x, y: msg.y });
 
@@ -147,8 +177,6 @@ export class Game extends Scene {
                 remote.setDepth(remote.y);
             }
 
-
-
             if (msg.type === 'player-shoot') {
                 this.createBullet(msg.x, msg.y, msg.angle);
             }
@@ -161,10 +189,16 @@ export class Game extends Scene {
                 msg.list.forEach((zData: any) => {
                     const zombie = this.zombies.zombiesMap.get(zData.id);
                     if (zombie) {
-                        zombie.setPosition(zData.x, zData.y);
-                        zombie.setDepth(zData.y);
+                        if (!this.isHost) {
+                            zombie.setData('targetX', zData.x);
+                            zombie.setData('targetY', zData.y);
+                        } else {
+                            zombie.setPosition(zData.x, zData.y);
+                        }
                     } else if (!this.isHost) {
-                        this.zombies.spawn(zData.id, zData.x, zData.y);
+                        const newZombie = this.zombies.spawn(zData.id, zData.x, zData.y);
+                        newZombie.setData('targetX', zData.x);
+                        newZombie.setData('targetY', zData.y);
                     }
                 });
             }
@@ -173,6 +207,35 @@ export class Game extends Scene {
                 this.zombies.remove(msg.id);
             }
         });
+        EventBus.on('peer-disconnected', (id: string) => {
+            console.log("Limpando fantasma do player:", id);
+
+            // 1. Remove o boneco visual da tela
+            const remote = this.remotePlayers.get(id);
+            if (remote) {
+                remote.destroy(); // Mata o objeto no Phaser
+                this.remotePlayers.delete(id); // Remove do Map visual
+            }
+
+            // 2. Remove os dados de posição (ESSENCIAL PARA OS ZUMBIS PARAREM DE IR NELE)
+            this.lastRemoteData.delete(id);
+
+            // 3. Remove da lista de sucessão caso você seja o host
+            this.multiplayer.removePeer(id);
+        });
+    }
+
+    removeGhostPlayer(id: string) {
+        console.log("Exorcizando fantasma:", id);
+
+        const remote = this.remotePlayers.get(id);
+        if (remote) {
+            remote.destroy();
+            this.remotePlayers.delete(id);
+        }
+        this.lastRemoteData.delete(id);
+        this.lastSeenMap.delete(id);
+        this.multiplayer.removePeer(id);
     }
 
     handleRemoteMove(id: string, data: any) {
@@ -198,6 +261,25 @@ export class Game extends Scene {
     }
 
     update(_time: number, delta: number) {
+        const timeoutThreshold = 10000;
+        this.lastSeenMap.forEach((lastTime, id) => {
+            if (_time - lastTime > timeoutThreshold) {
+                console.warn("Player", id, "está em silêncio há muito tempo. Removendo...");
+                this.removeGhostPlayer(id);
+            }
+        });
+        if (this.isHost) {
+            const allPlayers = [{ id: 'host', x: this.playerData.x, y: this.playerData.y }];
+
+            this.remotePlayers.forEach((_p, id) => {
+                const data = this.lastRemoteData.get(id);
+                if (data) {
+                    allPlayers.push({ id, x: data.x, y: data.y });
+                }
+            });
+
+            this.zombies.updateHost(allPlayers);
+        }
         const dt = delta / 1000;
         let moveX = 0; let moveY = 0;
 
@@ -222,22 +304,25 @@ export class Game extends Scene {
 
         this.cameras.main.centerOn(isoX, isoY);
 
-        if (this.isHost) {
-            const allPlayers = [
-                { id: 'host', x: this.playerData.x, y: this.playerData.y }
-            ];
-            this.remotePlayers.forEach((_p, id) => {
-                const data = this.lastRemoteData.get(id);
-                if (data) allPlayers.push({ id, x: data.x, y: data.y });
-            });
+        if (!this.isHost) {
+            this.checkHostHealth(_time);
+        }
+        if (!this.isHost) {
+            this.zombies.zombiesMap.forEach((zombie) => {
+                const targetX = zombie.getData('targetX');
+                const targetY = zombie.getData('targetY');
 
-            this.zombies.updateHost(allPlayers);
+                if (targetX !== undefined && targetY !== undefined) {
+                    // O valor 0.2 define a suavidade (0.1 = mais lento/suave, 0.5 = mais rápido)
+                    const lerpFactor = 0.15;
 
-            const zombieList: any[] = [];
-            this.zombies.zombiesMap.forEach((z, id) => {
-                zombieList.push({ id, x: z.x, y: z.y }); // Enviamos o X/Y da tela
+                    const newX = Phaser.Math.Linear(zombie.x, targetX, lerpFactor);
+                    const newY = Phaser.Math.Linear(zombie.y, targetY, lerpFactor);
+
+                    zombie.setPosition(newX, newY);
+                    zombie.setDepth(newY); // Mantém a profundidade correta
+                }
             });
-            this.multiplayer.broadcast('zombie-update', { list: zombieList });
         }
     }
 
@@ -322,5 +407,85 @@ export class Game extends Scene {
         );
 
         this.time.delayedCall(1000, () => bullet.destroy());
+    }
+
+    checkHostHealth(currentTime: number) {
+        if (this.isHost || this.lastHostHeartbeat === 0) return;
+
+        const timeSinceLastSignal = currentTime - this.lastHostHeartbeat;
+
+        if (timeSinceLastSignal > this.migrationThreshold) {
+            // FILTRO: Pegamos todos os players, EXCETO o host que sumiu
+            const remainingPeers = this.multiplayer.allPeers.filter(id => id !== this.hostID_atual);
+
+            // O novo sucessor é o menor ID entre os que sobraram
+            const nextHost = remainingPeers[0];
+
+            if (nextHost === this.multiplayer.myID) {
+                console.log("%c EU SOU O NOVO HOST!", "background: red; color: white; font-size: 20px");
+                this.becomeHost();
+            } else {
+                // Se eu não sou o próximo, eu apenas espero, mas evito o spam
+                if (this.time.now % 2000 < 20) { // Loga apenas a cada 2 segundos
+                    console.log("Aguardando sucessor real:", nextHost);
+                }
+            }
+        }
+    }
+
+    becomeHost() {
+        if (this.isHost) return;
+
+        const oldHostID = this.hostID_atual; // Guarda quem era o fantasma
+
+        this.isHost = true;
+        this.hostID_atual = this.multiplayer.myID;
+
+        const ghostPlayer = this.remotePlayers.get(oldHostID);
+        if (ghostPlayer) {
+            ghostPlayer.destroy();
+            this.remotePlayers.delete(oldHostID);
+        }
+
+        this.lastRemoteData.delete(oldHostID);
+
+        this.multiplayer.removePeer(oldHostID);
+
+        // --- CONTINUAÇÃO NORMAL ---
+        this.multiplayer.broadcast('host-migration-start', {
+            newHostID: this.multiplayer.myID
+        });
+
+        this.startHostHeartbeat();
+        console.log("%c EU SOU O NOVO HOST E LIMPEI OS FANTASMAS!", "color: red; font-weight: bold;");
+    }
+
+    handleHostMigration(newHostID: string) {
+        const oldHostID = this.hostID_atual;
+
+        // Se o host antigo ainda estiver na tela, removemos
+        const oldSprite = this.remotePlayers.get(oldHostID);
+        if (oldSprite) {
+            oldSprite.destroy();
+            this.remotePlayers.delete(oldHostID);
+        }
+        this.lastRemoteData.delete(oldHostID);
+
+        // Agora o "Dono da Sala" mudou
+        this.hostID_atual = newHostID;
+        this.lastHostHeartbeat = this.time.now;
+    }
+
+    startHostHeartbeat() {
+        // Se já existir um worker, mata o antigo antes de começar
+        this.heartbeatWorker?.terminate();
+
+        this.heartbeatWorker = new Worker('/heartbeatWorker.js');
+        this.heartbeatWorker.onmessage = (e) => {
+            if (e.data === 'tick' && this.isHost) {
+                this.runHostSimulation();
+            }
+        };
+        console.log("Marcapasso de Host iniciado!");
     }
 }
