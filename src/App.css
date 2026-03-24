@@ -1,14 +1,24 @@
-/* Reseta as margens do navegador */
-margin, body, #root, #app {
+/* ── Reset global ────────────────────────────────────────────────── */
+/* CORREÇÃO: o seletor original era "margin, body, ..." — inválido.   */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
     margin: 0;
     padding: 0;
+}
+
+html,
+body,
+#root,
+#app {
     width: 100vw;
     height: 100vh;
-    overflow: hidden; /* Impede barras de rolagem */
+    overflow: hidden;
     background-color: #000;
 }
 
-/* Faz o container do Phaser ocupar tudo */
+/* ── Container do Phaser ─────────────────────────────────────────── */
 #game-container {
     width: 100%;
     height: 100%;
@@ -17,7 +27,82 @@ margin, body, #root, #app {
     align-items: center;
 }
 
-/* Garante que o canvas não tenha espaços estranhos */
 canvas {
     display: block;
+}
+
+/* ── Menu principal ──────────────────────────────────────────────── */
+.menu {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: rgba(0, 0, 0, 0.82);
+    color: #fff;
+    font-family: 'Arial Black', Arial, sans-serif;
+}
+
+.menu h1 {
+    font-size: clamp(1.8rem, 5vw, 3rem);
+    color: #ff4444;
+    text-shadow: 0 0 20px #ff000088;
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+}
+
+.menu hr {
+    width: 260px;
+    border: none;
+    border-top: 1px solid #444;
+}
+
+.menu button {
+    width: 260px;
+    padding: 12px 0;
+    font-size: 1rem;
+    font-family: inherit;
+    font-weight: bold;
+    letter-spacing: 1px;
+    cursor: pointer;
+    border: 2px solid #ff4444;
+    background: transparent;
+    color: #fff;
+    border-radius: 4px;
+    transition: background 0.15s, color 0.15s;
+}
+
+.menu button:hover {
+    background: #ff4444;
+    color: #000;
+}
+
+.menu input {
+    width: 260px;
+    padding: 10px 12px;
+    font-size: 0.95rem;
+    font-family: monospace;
+    background: #111;
+    border: 1px solid #555;
+    color: #fff;
+    border-radius: 4px;
+    outline: none;
+}
+
+.menu input:focus {
+    border-color: #ff4444;
+}
+
+.menu-loading {
+    font-size: 1.4rem;
+    color: #ffcc00;
+    animation: pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+    from { opacity: 0.5; }
+    to   { opacity: 1;   }
 }
