@@ -13,10 +13,17 @@ const config: Phaser.Types.Core.GameConfig = {
     height: 768,
     parent: 'game-container',
     backgroundColor: '#2d2d2d',
+    fps: {
+        target: 60,
+        forceSetTimeOut: true,
+        smoothStep: false,
+        min: 30
+    },
     physics: {
         default: 'arcade',
         arcade: {
-            debug: true
+            debug: true,
+            fps: 60
         }
     },
     scene: [

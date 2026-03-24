@@ -13,6 +13,7 @@ export class Game extends Scene {
     isHost: boolean = false;
     lastDamageTime: number = 0;
     lastRemoteData: Map<string, { x: number, y: number }> = new Map();
+    private heartbeatWorker: Worker | null = null;
     wasd: any;
 
     playerData = { x: 0, y: 0, speed: 250, hp: 100 };
@@ -22,6 +23,24 @@ export class Game extends Scene {
     }
 
     create() {
+        this.sound.pauseOnBlur = false;
+        this.game.events.removeAllListeners('blur');
+        this.game.events.removeAllListeners('focus');
+        this.heartbeatWorker = new Worker('/heartbeatWorker.js');
+        this.heartbeatWorker.onmessage = (e) => {
+            if (e.data === 'tick') {
+                if (this.isHost) {
+                    this.runHostSimulation(); // IA e Física
+                } else {
+                    this.sendClientData(); // Cliente envia posição mesmo minimizado
+                }
+            }
+        };
+
+        this.events.on('destroy', () => {
+            this.heartbeatWorker?.terminate();
+        });
+
         this.cameras.main.setBackgroundColor('#2d2d2d');
         this.multiplayer = new MultiplayerService();
         this.zombies = new ZombieManager(this);
@@ -49,23 +68,9 @@ export class Game extends Scene {
                 await this.multiplayer.joinGame(data.roomId);
             }
         });
-        this.physics.add.overlap(this.bullets, this.zombies.group, (bullet, zombieContainer: any) => {
-            bullet.destroy();
-
-            // Se EU sou o Host, eu decido que o zumbi morreu e aviso geral
-            if (this.isHost) {
-                let zombieId = "";
-                this.zombies.zombiesMap.forEach((v, k) => { if (v === zombieContainer) zombieId = k; });
-
-                if (zombieId) {
-                    this.zombies.remove(zombieId);
-                    this.multiplayer.broadcast('zombie-death', { id: zombieId });
-                }
-            } else {
-                // Se eu sou apenas um cliente, eu "escondo" o zumbi da minha tela
-                // para parecer que acertei, mas o Host vai confirmar a morte depois.
-                zombieContainer.setActive(false).setVisible(false);
-            }
+        this.physics.add.overlap(this.bullets, this.zombies.group, (bullet: any, zombie: any) => {
+            // Se estiver em foco, a colisão normal do Phaser chama a nossa função
+            this.handleZombieHit(bullet, zombie as Phaser.GameObjects.Container);
         });
         this.physics.add.overlap(this.localPlayer, this.zombies.group, (_player, _zombieContainer: any) => {
             if (this.time.now > (this.lastDamageTime || 0)) {
@@ -88,6 +93,26 @@ export class Game extends Scene {
         EventBus.emit('current-scene-ready', this);
     }
 
+    sendNetworkUpdates() {
+        if (!this.multiplayer || !this.multiplayer.isHost) return;
+
+        const zombieList: any[] = [];
+        this.zombies.zombiesMap.forEach((z, id) => {
+            zombieList.push({ id, x: z.x, y: z.y });
+        });
+
+        if (zombieList.length > 0) {
+            this.multiplayer.broadcast('zombie-update', { list: zombieList });
+        }
+
+        this.multiplayer.broadcast('move', {
+            x: this.playerData.x,
+            y: this.playerData.y,
+            angle: this.localPlayer.rotation
+        });
+    }
+
+
     spawnZombieHost() {
         const id = "zombie_" + Date.now() + Math.random();
         const angle = Math.random() * Math.PI * 2;
@@ -108,8 +133,20 @@ export class Game extends Scene {
 
             if (msg.type === 'move') {
                 this.lastRemoteData.set(from, { x: msg.x, y: msg.y });
-                this.handleRemoteMove(from, msg);
+
+                let remote = this.remotePlayers.get(from);
+                if (!remote) {
+                    remote = new Player(this, msg.x, msg.y, false);
+                    this.remotePlayers.set(from, remote);
+                }
+
+                const isoX = msg.x - msg.y;
+                const isoY = (msg.x + msg.y) / 2;
+                remote.setPosition(isoX, isoY);
+                remote.setRotation(msg.angle);
+                remote.setDepth(remote.y);
             }
+
 
 
             if (msg.type === 'player-shoot') {
@@ -141,17 +178,23 @@ export class Game extends Scene {
     handleRemoteMove(id: string, data: any) {
         let remote = this.remotePlayers.get(id);
 
-        // Se o player ainda não existe na nossa tela, criamos ele
         if (!remote) {
             remote = new Player(this, data.x, data.y, false);
             this.remotePlayers.set(id, remote);
         }
 
-        // Atualiza a posição visual
-        const isoX = data.x - data.y;
-        const isoY = (data.x + data.y) / 2;
-        remote.setPosition(isoX, isoY);
-        remote.setRotation(data.angle);
+        const targetIsoX = data.x - data.y;
+        const targetIsoY = (data.x + data.y) / 2;
+
+        this.tweens.add({
+            targets: remote,
+            x: targetIsoX,
+            y: targetIsoY,
+            duration: 50, // Tempo entre as batidas do worker (50ms)
+            ease: 'Linear'
+        });
+
+        remote.setRotation(data.angle)
     }
 
     update(_time: number, delta: number) {
@@ -177,13 +220,6 @@ export class Game extends Scene {
         const angle = Math.atan2((pointer.y - (this.cameras.main.height / 2)) * 2, pointer.x - (this.cameras.main.width / 2));
         this.localPlayer.setRotation(angle);
 
-        // 3. ENVIAR PARA TODOS VIA BROADCAST (Substitui o sendMove)
-        this.multiplayer.broadcast('move', {
-            x: this.playerData.x,
-            y: this.playerData.y,
-            angle: this.localPlayer.rotation
-        });
-
         this.cameras.main.centerOn(isoX, isoY);
 
         if (this.isHost) {
@@ -205,6 +241,55 @@ export class Game extends Scene {
         }
     }
 
+    runHostSimulation() {
+        // 1. Atualiza IA dos Zumbis
+        const allPlayers = [{ id: 'host', x: this.playerData.x, y: this.playerData.y }];
+        this.remotePlayers.forEach((_p, id) => {
+            const data = this.lastRemoteData.get(id);
+            if (data) allPlayers.push({ id, x: data.x, y: data.y });
+        });
+        this.zombies.updateHost(allPlayers);
+
+        // 2. FORÇA A FÍSICA A ANDAR (Passo manual de 33ms)
+        // Isso garante que colisões e movimentos funcionem a 30fps no background
+        this.physics.world.step(1 / 30);
+
+        // 3. Checa colisões de tiros (manual)
+        this.physics.world.overlap(this.bullets, this.zombies.group, (bullet: any, zombie: any) => {
+            this.handleZombieHit(bullet, zombie);
+        });
+
+        // 4. Envia tudo para os clientes
+        this.sendNetworkUpdates();
+    }
+
+    sendClientData() {
+        // Se você for cliente e estiver minimizado, continue mandando sua posição
+        this.multiplayer.broadcast('move', {
+            x: this.playerData.x,
+            y: this.playerData.y,
+            angle: this.localPlayer.rotation
+        });
+    }
+
+    handleZombieHit(bullet: Phaser.GameObjects.GameObject, zombieContainer: Phaser.GameObjects.Container) {
+        // 1. Destruir a bala
+        bullet.destroy();
+
+        // 2. Achar o ID do zumbi
+        let zombieId = "";
+        this.zombies.zombiesMap.forEach((v, k) => {
+            if (v === zombieContainer) zombieId = k;
+        });
+
+        if (zombieId) {
+            // 3. Remover fisicamente do Host imediatamente
+            this.zombies.remove(zombieId);
+
+            // 4. Avisar todos os players para removerem também
+            this.multiplayer.broadcast('zombie-death', { id: zombieId });
+        }
+    }
     shoot() {
         const angle = this.localPlayer.rotation;
         const x = this.playerData.x;
