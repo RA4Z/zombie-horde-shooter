@@ -9,7 +9,7 @@ import './App.css';
 // ─── HUD ─────────────────────────────────────────────────────────────────────
 
 function HealthBar({ hp }: { hp: number }) {
-    const pct   = Math.max(0, Math.min(100, hp));
+    const pct = Math.max(0, Math.min(100, hp));
     const color = pct > 50 ? '#22dd66' : pct > 25 ? '#ffaa22' : '#ff3333';
 
     return (
@@ -88,12 +88,35 @@ function HUD({
     isSpectating: boolean;
     spectateTarget: string;
 }) {
+    const [copied, setCopied] = useState(false);
+    const handleCopy = async () => {
+        if (!roomKey) return;
+
+        try {
+            await navigator.clipboard.writeText(roomKey);
+            setCopied(true);
+
+            // Reseta o estado após 2 segundos
+            setTimeout(() => setCopied(false), 2000);
+        } catch (err) {
+            console.error('Falha ao copiar:', err);
+        }
+    };
     return (
         <>
             {/* Top-left: HP + sala */}
             <div className="hud-block hud-topleft">
                 <HealthBar hp={hp} />
-                {roomKey && <div className="hud-room">🔑 {roomKey.slice(0, 10)}…</div>}
+                {roomKey && (
+                    <div
+                        className="hud-room"
+                        onClick={handleCopy}
+                        style={{ cursor: 'pointer', userSelect: 'none' }}
+                        title="Clique para copiar a chave da sala"
+                    >
+                        {copied ? "✅ Copiado!" : `🔑 ${roomKey.slice(0, 10)}…`}
+                    </div>
+                )}
             </div>
 
             {/* Top-center: Horda */}
@@ -208,7 +231,7 @@ function LeaderboardScreen({
 
                 <div className="vote-buttons">
                     <VoteButton choice="restart" current={myVote} onClick={handleVote} label="RECOMEÇAR" icon="🔄" />
-                    <VoteButton choice="leave"   current={myVote} onClick={handleVote} label="SAIR"      icon="🚪" />
+                    <VoteButton choice="leave" current={myVote} onClick={handleVote} label="SAIR" icon="🚪" />
                 </div>
 
                 {myVote && (
@@ -227,7 +250,7 @@ function LeaderboardScreen({
 function MainMenuUI() {
     const [joinKey, setJoinKey] = useState('');
     const [loading, setLoading] = useState(false);
-    const [error, setError]     = useState('');
+    const [error, setError] = useState('');
 
     const startAsHost = useCallback(() => {
         setLoading(true); setError('');
@@ -268,15 +291,15 @@ function MainMenuUI() {
 type Screen = 'menu' | 'game' | 'leaderboard';
 
 export default function App() {
-    const [screen, setScreen]           = useState<Screen>('menu');
-    const [hp, setHp]                   = useState(100);
-    const [roomKey, setRoomKey]         = useState('');
-    const [scores, setScores]           = useState<PlayerScore[]>([]);
-    const [horde, setHorde]             = useState<HordeState | null>(null);
+    const [screen, setScreen] = useState<Screen>('menu');
+    const [hp, setHp] = useState(100);
+    const [roomKey, setRoomKey] = useState('');
+    const [scores, setScores] = useState<PlayerScore[]>([]);
+    const [horde, setHorde] = useState<HordeState | null>(null);
     const [isSpectating, setSpectating] = useState(false);
     const [spectateTarget, setSpectTarget] = useState('');
-    const [voteState, setVoteState]     = useState<VoteState | null>(null);
-    const leaderboardRef                = useRef<PlayerScore[]>([]);
+    const [voteState, setVoteState] = useState<VoteState | null>(null);
+    const leaderboardRef = useRef<PlayerScore[]>([]);
 
     useEffect(() => {
         const onRoomJoined = (key: string) => { setScreen('game'); setRoomKey(key); };
@@ -318,32 +341,32 @@ export default function App() {
             setHp(100); setSpectating(false); setVoteState(null);
         };
 
-        EventBus.on('room-joined',       onRoomJoined);
-        EventBus.on('player-stats',      onPlayerStats);
-        EventBus.on('player-died',       onPlayerDied);
-        EventBus.on('spectate-start',    onSpectateTarget);
-        EventBus.on('spectate-target',   onSpectateTarget);
-        EventBus.on('horde-state',       onHordeState);
-        EventBus.on('score-update',      onScoreUpdate);
-        EventBus.on('show-leaderboard',  onShowLeaderboard);
-        EventBus.on('vote-state',        onVoteState);
-        EventBus.on('vote-resolved',     onVoteResolved);
-        EventBus.on('session-end',       onSessionEnd);
-        EventBus.on('game-restarted',    onGameRestarted);
+        EventBus.on('room-joined', onRoomJoined);
+        EventBus.on('player-stats', onPlayerStats);
+        EventBus.on('player-died', onPlayerDied);
+        EventBus.on('spectate-start', onSpectateTarget);
+        EventBus.on('spectate-target', onSpectateTarget);
+        EventBus.on('horde-state', onHordeState);
+        EventBus.on('score-update', onScoreUpdate);
+        EventBus.on('show-leaderboard', onShowLeaderboard);
+        EventBus.on('vote-state', onVoteState);
+        EventBus.on('vote-resolved', onVoteResolved);
+        EventBus.on('session-end', onSessionEnd);
+        EventBus.on('game-restarted', onGameRestarted);
 
         return () => {
-            EventBus.removeListener('room-joined',       onRoomJoined);
-            EventBus.removeListener('player-stats',      onPlayerStats);
-            EventBus.removeListener('player-died',       onPlayerDied);
-            EventBus.removeListener('spectate-start',    onSpectateTarget);
-            EventBus.removeListener('spectate-target',   onSpectateTarget);
-            EventBus.removeListener('horde-state',       onHordeState);
-            EventBus.removeListener('score-update',      onScoreUpdate);
-            EventBus.removeListener('show-leaderboard',  onShowLeaderboard);
-            EventBus.removeListener('vote-state',        onVoteState);
-            EventBus.removeListener('vote-resolved',     onVoteResolved);
-            EventBus.removeListener('session-end',       onSessionEnd);
-            EventBus.removeListener('game-restarted',    onGameRestarted);
+            EventBus.removeListener('room-joined', onRoomJoined);
+            EventBus.removeListener('player-stats', onPlayerStats);
+            EventBus.removeListener('player-died', onPlayerDied);
+            EventBus.removeListener('spectate-start', onSpectateTarget);
+            EventBus.removeListener('spectate-target', onSpectateTarget);
+            EventBus.removeListener('horde-state', onHordeState);
+            EventBus.removeListener('score-update', onScoreUpdate);
+            EventBus.removeListener('show-leaderboard', onShowLeaderboard);
+            EventBus.removeListener('vote-state', onVoteState);
+            EventBus.removeListener('vote-resolved', onVoteResolved);
+            EventBus.removeListener('session-end', onSessionEnd);
+            EventBus.removeListener('game-restarted', onGameRestarted);
         };
     }, []);
 
