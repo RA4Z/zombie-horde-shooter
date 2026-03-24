@@ -11,9 +11,9 @@ export class Player extends Phaser.GameObjects.Container {
         this.add([this.bodyCircle, this.gun]);
         scene.add.existing(this);
         scene.physics.add.existing(this);
-    }
 
-    updateRotation(angle: number) {
-        this.setRotation(angle);
+        const body = this.body as Phaser.Physics.Arcade.Body;
+        body.setSize(40, 20); // Tamanho achatado para combinar com o visual isométrico
+        body.setOffset(-20, -10); // Centraliza a caixa no boneco
     }
 }
