@@ -5,26 +5,24 @@ export interface HordeState {
     zombiesRemaining: number;
     zombiesTotal: number;
     phase: 'fighting' | 'countdown' | 'idle';
-    countdown: number; // segundos restantes
+    countdown: number;
 }
 
 /**
- * Gerencia o sistema de hordas infinitas.
+ * HordeManager — sistema de hordas infinitas.
  *
- * Regras:
- *  - Cada horda tem (BASE_COUNT + wave * SCALE_PER_WAVE) zumbis
- *  - A cada 5 hordas, o HP dos zumbis aumenta em HP_BONUS_PER_5_WAVES
- *  - Entre hordas: countdown de 10s antes de iniciar a próxima
- *  - Só o HOST executa a lógica; clientes recebem via rede
+ * FIX: onWaveComplete é chamado UMA ÚNICA VEZ por horda, no momento em que
+ * o último zumbi morre (ANTES do countdown). onStateChange apenas replica
+ * o estado pela rede — ele NUNCA aciona bônus de pontuação.
  */
 export class HordeManager {
     private static readonly BASE_COUNT        = 5;
     private static readonly SCALE_PER_WAVE    = 3;
     private static readonly BASE_HP           = 1;
     private static readonly HP_BONUS_INTERVAL = 5;
-    private static readonly HP_BONUS_VALUE    = 1; // +1 hit para matar a cada 5 hordas
+    private static readonly HP_BONUS_VALUE    = 1;
     private static readonly COUNTDOWN_SECS    = 10;
-    private static readonly SPAWN_INTERVAL_MS = 800; // ms entre spawns individuais
+    private static readonly SPAWN_INTERVAL_MS = 800;
 
     wave            = 0;
     zombieHp        = HordeManager.BASE_HP;
@@ -34,32 +32,45 @@ export class HordeManager {
     private zombiesSpawned   = 0;
     private zombiesThisWave  = 0;
     private countdownSecs    = 0;
-    private countdownTimer: ReturnType<typeof setInterval> | null = null;
-    private spawnTimer:     ReturnType<typeof setInterval> | null = null;
+    private countdownTimer:  ReturnType<typeof setInterval> | null = null;
+    private spawnTimer:      ReturnType<typeof setInterval> | null = null;
+    private waveCompleteFired = false;   // guard: dispara bônus só 1x por horda
 
-    /** Callback chamado pelo HordeManager para spawnar um zumbi */
+    /** Chamado para fazer spawn de um zumbi (host only) */
     onSpawnZombie: (() => void) | null = null;
-    /** Callback chamado quando o estado muda (para broadcast de rede) */
+    /** Chamado para broadcast de rede — NÃO deve acionar pontuação */
     onStateChange: ((state: HordeState) => void) | null = null;
+    /** Chamado UMA VEZ quando todos os zumbis da horda morreram */
+    onWaveComplete: ((wave: number) => void) | null = null;
 
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /** Inicia o sistema (primeira contagem regressiva) */
     start() {
+        this.clearTimers();
+        this.wave             = 0;
+        this.zombieHp         = HordeManager.BASE_HP;
+        this.zombiesAlive     = 0;
+        this.zombiesSpawned   = 0;
+        this.zombiesThisWave  = 0;
+        this.phase            = 'idle';
+        this.waveCompleteFired = false;
         this.beginCountdown();
     }
 
-    /** Deve ser chamado pelo Game toda vez que um zumbi morre */
     onZombieDied() {
         this.zombiesAlive = Math.max(0, this.zombiesAlive - 1);
         this.broadcastState();
 
-        if (this.zombiesAlive === 0 && this.zombiesSpawned >= this.zombiesThisWave) {
+        const allSpawned  = this.zombiesSpawned >= this.zombiesThisWave;
+        const allDead     = this.zombiesAlive === 0;
+        const fighting    = this.phase === 'fighting';
+
+        if (fighting && allSpawned && allDead && !this.waveCompleteFired) {
+            this.waveCompleteFired = true;
+            // Bônus ANTES do countdown
+            this.onWaveComplete?.(this.wave);
             this.beginCountdown();
         }
     }
 
-    /** Restaura o estado recebido do host (clientes) */
     applyNetworkState(state: HordeState) {
         this.wave          = state.wave;
         this.zombiesAlive  = state.zombiesRemaining;
@@ -68,9 +79,7 @@ export class HordeManager {
         EventBus.emit('horde-state', state);
     }
 
-    destroy() {
-        this.clearTimers();
-    }
+    destroy() { this.clearTimers(); }
 
     getState(): HordeState {
         return {
@@ -82,8 +91,6 @@ export class HordeManager {
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-
     private beginCountdown() {
         this.clearTimers();
         this.phase         = 'countdown';
@@ -91,9 +98,8 @@ export class HordeManager {
         this.broadcastState();
 
         this.countdownTimer = setInterval(() => {
-            this.countdownSecs--;
+            this.countdownSecs = Math.max(0, this.countdownSecs - 1);
             this.broadcastState();
-
             if (this.countdownSecs <= 0) {
                 clearInterval(this.countdownTimer!);
                 this.countdownTimer = null;
@@ -104,18 +110,17 @@ export class HordeManager {
 
     private startNextWave() {
         this.wave++;
-        this.zombiesThisWave = HordeManager.BASE_COUNT + (this.wave - 1) * HordeManager.SCALE_PER_WAVE;
-        this.zombiesSpawned  = 0;
-        this.zombiesAlive    = 0;
-        this.phase           = 'fighting';
+        this.zombiesThisWave  = HordeManager.BASE_COUNT + (this.wave - 1) * HordeManager.SCALE_PER_WAVE;
+        this.zombiesSpawned   = 0;
+        this.zombiesAlive     = 0;
+        this.phase            = 'fighting';
+        this.waveCompleteFired = false;
 
-        // HP aumenta a cada 5 hordas
         this.zombieHp = HordeManager.BASE_HP +
             Math.floor((this.wave - 1) / HordeManager.HP_BONUS_INTERVAL) * HordeManager.HP_BONUS_VALUE;
 
         this.broadcastState();
 
-        // Spawna os zumbis espaçados para não travar a rede
         this.spawnTimer = setInterval(() => {
             if (this.zombiesSpawned >= this.zombiesThisWave) {
                 clearInterval(this.spawnTimer!);
@@ -125,13 +130,14 @@ export class HordeManager {
             this.zombiesSpawned++;
             this.zombiesAlive++;
             this.onSpawnZombie?.();
+            this.broadcastState();
         }, HordeManager.SPAWN_INTERVAL_MS);
     }
 
     private broadcastState() {
         const state = this.getState();
-        EventBus.emit('horde-state', state);        // para React local
-        this.onStateChange?.(state);                // para broadcast de rede
+        EventBus.emit('horde-state', state);     // → React local
+        this.onStateChange?.(state);             // → rede (NÃO pontuação)
     }
 
     private clearTimers() {
