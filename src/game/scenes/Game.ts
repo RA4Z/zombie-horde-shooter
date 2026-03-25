@@ -20,8 +20,16 @@ const RELOAD_TIME_MS  = 2200; // tempo de recarga em ms
 const SHOOT_COOLDOWN  = 120;  // ms entre tiros (cadência)
 
 // ── Escala do mundo ───────────────────────────────────────────────────────────
-// Zoom da câmera: 1.0 = padrão Phaser. Valores > 1 aproximam.
 const CAMERA_ZOOM = 1.6;
+
+// ── Layers de profundidade ────────────────────────────────────────────────────
+// O sistema de depth usa as seguintes faixas:
+//   -1000 a -501 : chão (ground tiles, roads)
+//   -500         : CityWorld graphics base (setDepth no build())
+//   -500 a -1    : decorações de chão
+//   0+           : objetos do mundo — depth = isoY (paint-sort)
+//                  prédios usam isoY da base + altura visual para ficar acima
+//   999999       : UI / HUD
 
 export class Game extends Scene {
     // Entidades
@@ -55,6 +63,7 @@ export class Game extends Scene {
     private isSpectating = false;
     private spectateTargetId = '';
     private myId = HOST_PLAYER_ID;
+    private myName = 'Player';
 
     // Munição
     private ammo         = MAG_SIZE;
@@ -138,7 +147,12 @@ export class Game extends Scene {
         // Hooks horde
         this.horde.onSpawnZombie  = () => this.spawnZombieHost();
         this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
-        this.horde.onWaveComplete = (wave)  => { this.score.onWaveComplete(wave); this.broadcastScores(); };
+        // FIX: onWaveComplete agora revive jogadores mortos antes de dar bônus
+        this.horde.onWaveComplete = (wave) => {
+            this.reviveDeadPlayers();
+            this.score.onWaveComplete(wave);
+            this.broadcastScores();
+        };
 
         // Hooks votação
         this.vote.onRestart  = (staying) => this.handleVoteRestart(staying);
@@ -154,7 +168,7 @@ export class Game extends Scene {
         EventBus.on('cast-vote',         this.onCastVote,       this);
         EventBus.on('connection-error',  this.onConnectionError, this);
 
-        // Zoom da câmera — mundo maior, mais detalhado
+        // Zoom da câmera
         this.cameras.main.setZoom(CAMERA_ZOOM);
         this.cameras.main.centerOn(0, 0);
 
@@ -181,15 +195,12 @@ export class Game extends Scene {
             this.processMovement(delta);
             this.aimAtPointer();
 
-            // Tecla R → recarga manual
             if (this.reloadKey && Phaser.Input.Keyboard.JustDown(this.reloadKey)) {
                 this.startReload();
             }
 
-            // Passos de áudio
             this.audio.step(_time, this.isMoving);
 
-            // Gemidos de zumbi periódicos
             this.zombieGroanTimer -= delta;
             if (this.zombieGroanTimer <= 0 && this.zombies.zombiesMap.size > 0) {
                 this.audio.zombieGroan();
@@ -200,6 +211,10 @@ export class Game extends Scene {
         }
 
         this.updateCamera();
+
+        // FIX: Depth sort de players e zumbis para que prédios fiquem na frente
+        // quando o objeto está "atrás" (menor isoY = mais ao norte = menor depth)
+        this.updateDepths();
     }
 
     shutdown() {
@@ -212,10 +227,10 @@ export class Game extends Scene {
         this.multiplayer.destroy();
         this.audio.destroy();
         this.cityWorldBuilt = false;
-        EventBus.removeListener('start-game',       this.onStartGame);
-        EventBus.removeListener('cast-vote',        this.onCastVote);
-        EventBus.removeListener('connection-error', this.onConnectionError);
-        EventBus.removeListener('network-data',     this.onNetworkData);
+        EventBus.removeListener('start-game',        this.onStartGame);
+        EventBus.removeListener('cast-vote',         this.onCastVote);
+        EventBus.removeListener('connection-error',  this.onConnectionError);
+        EventBus.removeListener('network-data',      this.onNetworkData);
         EventBus.removeListener('peer-disconnected', this.onPeerDisconnected);
     }
 
@@ -223,14 +238,18 @@ export class Game extends Scene {
     // Inicio de jogo
     // =========================================================================
 
-    private onStartGame = async (data: { isHost: boolean; roomId?: string }) => {
+    private onStartGame = async (data: { isHost: boolean; roomId?: string; name?: string }) => {
         if (this.isConnecting) return;
         this.isConnecting = true;
+
+        // FIX: armazena o nome informado no menu
+        if (data.name) this.myName = data.name.trim().slice(0, 16) || 'Player';
+        // Atualiza o label do player local
+        this.localPlayer.setNameLabel(this.myName);
 
         if (!this.cityWorldBuilt) {
             try {
                 this.cityWorld.build();
-                // Cria paredes de colisão baseadas nos edifícios do CityWorld
                 this.buildWalls();
                 this.cityWorldBuilt = true;
             } catch (err) {
@@ -241,9 +260,7 @@ export class Game extends Scene {
             }
         }
 
-        // Colisão do player com paredes
         this.physics.add.collider(this.localPlayer, this.walls);
-        // Colisão dos zumbis com paredes
         this.physics.add.collider(this.zombies.group, this.walls);
 
         this.isHost = data.isHost;
@@ -253,7 +270,7 @@ export class Game extends Scene {
             this.myId = HOST_PLAYER_ID;
             const key = await this.multiplayer.hostGame();
             this.hostID = this.multiplayer.myID;
-            this.score.registerPlayer(this.myId, 'Host');
+            this.score.registerPlayer(this.myId, this.myName);
             this.multiplayer.startHostHeartbeat();
             this.networkTimer.paused = false;
             this.horde.start();
@@ -266,7 +283,6 @@ export class Game extends Scene {
             this.isConnecting = false;
         }
 
-        // Emite estado inicial de munição
         this.emitAmmoState();
     };
 
@@ -274,18 +290,12 @@ export class Game extends Scene {
     // Paredes de colisão
     // =========================================================================
 
-    /**
-     * Gera hitboxes invisíveis sobre os edifícios do CityWorld.
-     * Usa o mesmo grid/seed que CityWorld.placeBlocks() para coincidir.
-     * As paredes são StaticBodies alinhadas ao grid isométrico.
-     */
     private buildWalls() {
         const T     = 64;
         const BLOCK = 4;
         const STEP  = BLOCK + 2;
         const RANGE = 4;
 
-        // RNG determinístico idêntico ao CityWorld
         const makeRng = (seed: number) => {
             let s = (seed ^ 0xdeadbeef) >>> 0 || 1;
             return () => {
@@ -304,31 +314,55 @@ export class Game extends Scene {
                 const type = rng();
 
                 if (type < 0.5) {
-                    // Quarteirão de edifícios — cria uma parede por quarteirão inteiro
                     this.addWallBlock(ox, oy, BLOCK * T, BLOCK * T);
                 }
-                // Estacionamentos e escombros são passáveis
             }
         }
     }
 
-    /**
-     * Adiciona um retângulo de colisão no espaço isométrico.
-     * Converte o centro cartesiano para ISO e cria um StaticBody achatado.
-     */
     private addWallBlock(wx: number, wy: number, w: number, d: number) {
-        // Centro do bloco em espaço cartesiano
         const cx = wx + w / 2;
         const cy = wy + d / 2;
         const { isoX, isoY } = cartesianToIso(cx, cy);
 
-        // A projeção isométrica acha o footprint: largura visual = w-d, altura = (w+d)/2
-        const isoW = (w + d);       // largura horizontal no ecrã
-        const isoH = (w + d) / 2;  // altura vertical no ecrã
+        const isoW = (w + d);
+        const isoH = (w + d) / 2;
 
         const wall = this.add.rectangle(isoX, isoY, isoW, isoH, 0xff0000, 0);
-        this.physics.add.existing(wall, true); // true = static
+        this.physics.add.existing(wall, true);
         this.walls.add(wall);
+    }
+
+    // =========================================================================
+    // Sistema de Depth / Layers
+    // =========================================================================
+
+    /**
+     * FIX: Atualiza depth de todos os objetos dinâmicos a cada frame.
+     * Usa isoY como chave de depth (painter's algorithm).
+     * O CityWorld usa depth -500 (fundo). Prédios são desenhados pelo Graphics
+     * com depth -500, mas o truque para que fiquem "na frente" dos objetos
+     * que passam por trás deles é: cada objeto usa seu isoY como depth.
+     * Objetos com isoY menor (mais ao norte/esquerda) têm depth menor → ficam atrás.
+     * Prédios que se projetam para cima: depth = isoY_base + altura_visual.
+     * Isso é gerenciado pelo CityWorld ao emitir os dados de profundidade via
+     * `buildingDepths`, que são retângulos invisíveis com depth correto.
+     */
+    private updateDepths() {
+        // Player local
+        if (this.localPlayer.active) {
+            this.localPlayer.setDepth(this.localPlayer.y);
+        }
+
+        // Players remotos
+        this.remotePlayers.forEach((p) => {
+            if (p.active) p.setDepth(p.y);
+        });
+
+        // Zumbis
+        this.zombies.zombiesMap.forEach((z) => {
+            z.setDepth(z.y);
+        });
     }
 
     // =========================================================================
@@ -409,7 +443,17 @@ export class Game extends Scene {
 
             case 'player-joined':
                 if (this.isHost) {
-                    this.score.registerPlayer(from, (data.name as string) ?? from.slice(0, 6));
+                    // FIX: recebe o nome do jogador que entrou
+                    const joinName = (data.name as string) ?? from.slice(0, 6);
+                    this.score.registerPlayer(from, joinName);
+                    // Cria o container visual do player remoto com o nome
+                    if (!this.remotePlayers.has(from)) {
+                        const remote = new Player(this, 0, 0, false);
+                        remote.setNameLabel(joinName);
+                        this.remotePlayers.set(from, remote);
+                        // Colisão com paredes
+                        this.physics.add.collider(remote, this.walls);
+                    }
                     this.broadcastScores();
                     this.multiplayer.broadcast('horde-state', { state: this.horde.getState() });
                 }
@@ -439,6 +483,13 @@ export class Game extends Scene {
             case 'zombie-hit':
                 this.audio.zombieHit();
                 this.zombies.hit(data.id as string);
+                break;
+
+            // FIX: host notifica clientes sobre revive ao fim da horda
+            case 'player-revived':
+                if (!this.isHost && (data.id as string) === this.myId) {
+                    this.handleRevive();
+                }
                 break;
 
             case 'horde-state':
@@ -496,7 +547,11 @@ export class Game extends Scene {
         this.multiplayer.broadcast('host-migration-start', { newHostID: this.multiplayer.myID });
         this.horde.onSpawnZombie  = () => this.spawnZombieHost();
         this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
-        this.horde.onWaveComplete = (wave)  => { this.score.onWaveComplete(wave); this.broadcastScores(); };
+        this.horde.onWaveComplete = (wave) => {
+            this.reviveDeadPlayers();
+            this.score.onWaveComplete(wave);
+            this.broadcastScores();
+        };
     }
 
     private handleHostMigration(newHostID: string) {
@@ -514,12 +569,17 @@ export class Game extends Scene {
         let remote = this.remotePlayers.get(id);
         if (!remote) {
             remote = new Player(this, 0, 0, false);
+            // FIX: tenta usar o nome já registrado no score
+            const lb = this.score.getLeaderboard();
+            const entry = lb.find(p => p.id === id);
+            if (entry) remote.setNameLabel(entry.name);
             this.remotePlayers.set(id, remote);
+            this.physics.add.collider(remote, this.walls);
         }
         const { isoX, isoY } = cartesianToIso(data.x as number, data.y as number);
         this.tweens.add({ targets: remote, x: isoX, y: isoY, duration: 50, ease: 'Linear' });
         remote.setRotation(data.angle as number);
-        remote.setDepth(isoY);
+        // depth atualizado em updateDepths()
     }
 
     private removePlayer(id: string) {
@@ -578,7 +638,12 @@ export class Game extends Scene {
         const died = this.zombies.hit(zombieId);
         if (died) {
             this.audio.zombieDeath();
-            this.score.addKill(this.myId, this.horde.wave);
+
+            // FIX: atribui o kill ao jogador que disparou a bala (marcado na bala)
+            // A bala carrega 'shooterId'; se não tiver (bala de cliente) usamos myId
+            const shooterId = (bullet as any).getData?.('shooterId') as string | undefined ?? this.myId;
+            this.score.addKill(shooterId, this.horde.wave);
+
             this.horde.onZombieDied();
             this.zombies.remove(zombieId);
             this.multiplayer.broadcast('zombie-death', { id: zombieId });
@@ -599,7 +664,7 @@ export class Game extends Scene {
     };
 
     // =========================================================================
-    // Morte / Espectador
+    // Morte / Espectador / Revive
     // =========================================================================
 
     private playerDied() {
@@ -612,6 +677,48 @@ export class Game extends Scene {
         EventBus.emit('player-died', {});
         if (this.isHost) { this.score.markDead(this.myId); this.checkAllDead(); }
         this.startSpectating();
+    }
+
+    /**
+     * FIX: Revive todos os jogadores mortos ao fim da horda (host-side).
+     * Jogadores remotos mortos recebem 'player-revived' pela rede.
+     * O host revive a si mesmo diretamente.
+     */
+    private reviveDeadPlayers() {
+        if (!this.isHost) return;
+
+        // Revive host se estiver morto
+        if (!this.isAlive) {
+            this.handleRevive();
+            this.score.markAlive(this.myId);
+        }
+
+        // Revive remotos mortos
+        const deadRemotes: string[] = [];
+        this.score.getLeaderboard().forEach(p => {
+            if (!p.alive && p.id !== this.myId) deadRemotes.push(p.id);
+        });
+        deadRemotes.forEach(id => {
+            this.score.markAlive(id);
+            this.multiplayer.broadcast('player-revived', { id });
+            // Reativa o container visual do player remoto
+            const remote = this.remotePlayers.get(id);
+            if (remote) {
+                remote.setVisible(true).setActive(true);
+                (remote.body as Phaser.Physics.Arcade.Body).enable = true;
+            }
+        });
+    }
+
+    /** Restaura estado vivo do jogador local */
+    private handleRevive() {
+        this.isAlive      = true;
+        this.isSpectating = false;
+        this.playerData.hp = 100;
+        this.localPlayer.setVisible(true).setActive(true);
+        (this.localPlayer.body as Phaser.Physics.Arcade.Body).enable = true;
+        EventBus.emit('player-stats',   { hp: 100 });
+        EventBus.emit('player-revived', {});
     }
 
     private startSpectating() {
@@ -694,7 +801,11 @@ export class Game extends Scene {
             this.horde = new HordeManager();
             this.horde.onSpawnZombie  = () => this.spawnZombieHost();
             this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
-            this.horde.onWaveComplete = (wave)  => { this.score.onWaveComplete(wave); this.broadcastScores(); };
+            this.horde.onWaveComplete = (wave) => {
+                this.reviveDeadPlayers();
+                this.score.onWaveComplete(wave);
+                this.broadcastScores();
+            };
             this.horde.start();
         }
     }
@@ -745,24 +856,56 @@ export class Game extends Scene {
     // Input
     // =========================================================================
 
+    /**
+     * FIX: Movimento relativo à direção que o player está olhando.
+     * W = avança na direção do aim, S = recua, A/D = strafe lateral.
+     *
+     * O ângulo de rotação do player (this.localPlayer.rotation) é calculado
+     * em espaço de tela pelo aimAtPointer(). Precisamos converter esse
+     * ângulo de tela para o espaço cartesiano do mundo (que usa proporção 2:1).
+     *
+     * A bala já usa angle diretamente com coseno/seno em espaço de tela;
+     * aqui fazemos o mesmo para o movimento, mas re-mapeamos para cartesiano.
+     */
     private processMovement(delta: number) {
-        let mx = 0, my = 0;
-        if (this.wasd?.A?.isDown) mx -= 1;
-        if (this.wasd?.D?.isDown) mx += 1;
-        if (this.wasd?.W?.isDown) my -= 1;
-        if (this.wasd?.S?.isDown) my += 1;
+        const angle = this.localPlayer.rotation; // ângulo em espaço de tela
 
-        this.isMoving = mx !== 0 || my !== 0;
+        // Vetores de tela
+        const fwdScreenX = Math.cos(angle);
+        const fwdScreenY = Math.sin(angle);
+
+        // Perpendicular (direita = +90°)
+        const rgtScreenX =  fwdScreenY;
+        const rgtScreenY = -fwdScreenX;
+
+        // Acumula direção de input
+        let dx = 0, dy = 0;
+        if (this.wasd?.W?.isDown) { dx += fwdScreenX; dy += fwdScreenY; }
+        if (this.wasd?.S?.isDown) { dx -= fwdScreenX; dy -= fwdScreenY; }
+        if (this.wasd?.A?.isDown) { dx -= rgtScreenX; dy -= rgtScreenY; }
+        if (this.wasd?.D?.isDown) { dx += rgtScreenX; dy += rgtScreenY; }
+
+        this.isMoving = dx !== 0 || dy !== 0;
 
         if (this.isMoving) {
-            const len = Math.hypot(mx, my);
+            const len = Math.hypot(dx, dy);
             const dt  = delta / 1000;
-            this.playerData.x += (mx / len) * this.playerData.speed * dt;
-            this.playerData.y += (my / len) * this.playerData.speed * dt;
+
+            // Converte vetor de tela para cartesiano (inverso de isoToCartesian):
+            // isoX = x - y  →  x = (isoX + isoY*2)/2, y = (isoY*2 - isoX)/2
+            // mas isoY em tela = (x+y)/2, então para movimento usamos:
+            // cartX += (dx - dy) * speed * dt  (aproximação para isométrico 2:1)
+            // cartY += (dx + dy) * speed * dt
+            // O factor 2 no dy compensa o achatamento vertical da projeção.
+            const nx = dx / len;
+            const ny = dy / len;
+            this.playerData.x += (nx - ny * 2) * this.playerData.speed * dt;
+            this.playerData.y += (nx + ny * 2) * this.playerData.speed * dt;
         }
 
         const { isoX, isoY } = cartesianToIso(this.playerData.x, this.playerData.y);
-        this.localPlayer.setPosition(isoX, isoY).setDepth(isoY);
+        this.localPlayer.setPosition(isoX, isoY);
+        // depth atualizado em updateDepths()
     }
 
     private aimAtPointer() {
@@ -775,12 +918,10 @@ export class Game extends Scene {
     private shoot() {
         if (!this.isAlive) return;
 
-        // Cadência
         const now = this.time.now;
         if (now - this.lastShootTime < SHOOT_COOLDOWN) return;
         this.lastShootTime = now;
 
-        // Sem balas
         if (this.ammo <= 0 || this.isReloading) {
             if (!this.isReloading) {
                 this.audio.emptyClick();
@@ -794,22 +935,29 @@ export class Game extends Scene {
         this.audio.shoot();
 
         const angle = this.localPlayer.rotation;
-        this.createBullet(this.playerData.x, this.playerData.y, angle, true);
+        // FIX: passa o shooterId para a bala para atribuição correta de kills
+        this.createBullet(this.playerData.x, this.playerData.y, angle, true, this.myId);
         this.multiplayer.broadcast('player-shoot', {
             x: this.playerData.x, y: this.playerData.y, angle,
+            shooterId: this.myId,
         });
 
-        // Auto-recarga ao esvaziar o pente
         if (this.ammo === 0) {
             this.time.delayedCall(300, () => this.startReload());
         }
     }
 
-    private createBullet(wx: number, wy: number, angle: number, _local: boolean) {
+    /**
+     * FIX: createBullet agora recebe e armazena o shooterId na bala.
+     * O host usa esse dado em handleZombieHit para dar o kill ao jogador certo.
+     */
+    private createBullet(wx: number, wy: number, angle: number, _local: boolean, shooterId?: string) {
         const { isoX, isoY } = cartesianToIso(wx, wy);
-        const bullet = this.add.circle(isoX, isoY, 4, 0xffee22);
+        const bullet = this.add.circle(isoX, isoY, 4, 0xffee22) as Phaser.GameObjects.Arc & { shooterId?: string };
         this.physics.add.existing(bullet);
         this.bullets.add(bullet);
+        // Marca quem atirou para atribuição de kill
+        (bullet as any).setData('shooterId', shooterId ?? this.myId);
         const body = bullet.body as Phaser.Physics.Arcade.Body;
         body.setSize(10, 10);
         body.setVelocity(Math.cos(angle) * 950, (Math.sin(angle) * 950) / 2);

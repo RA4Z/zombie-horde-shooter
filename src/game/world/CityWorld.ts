@@ -3,27 +3,45 @@ import { cartesianToIso } from '../utils/IsoMath';
 /**
  * CityWorld — cidade pós-apocalíptica renderizada com Graphics Phaser.
  *
- * Tudo é pseudo-3D isométrico: base flat + faces laterais + topo.
- * Sem assets externos — 100% procedural usando primitivos.
+ * FIX: Sistema de layers/depth corrigido.
  *
- * Perspectiva: isométrica "side-on" (inclinação 2:1 padrão de jogos como
- * Age of Empires / Diablo). A câmera olha levemente de cima e de lado.
+ * Problema anterior: todo o cenário era um único Graphics com depth -500,
+ * então players e zumbis (depth = isoY, sempre positivo) ficavam sempre
+ * na frente de tudo, inclusive de prédios altos.
  *
- * Layout:
- *   - Grid de tiles 64×64 unidades de mundo
- *   - Ruas com 2 tiles de largura a cada 4 tiles de quarteirão
- *   - Quarteirões: prédios, estacionamentos ou escombros (aleatório por seed)
- *   - Postes, carros, destroços e poças preenchem os espaços
+ * Solução: separamos o mundo em 3 camadas de Graphics:
+ *   gGround  (depth -500)  — chão, ruas, calçadas
+ *   gWorld   (depth  0  )  — base dos prédios / decorações ao nível do chão
+ *   gRoof    (depth varia) — fachadas e telhados dos prédios
+ *
+ * Cada prédio recebe um Rectangle invisível (depthMarker) cujo depth é
+ * calculado como isoY_base + altura_visual, de forma que um objeto que
+ * passa "atrás" do prédio (isoY menor) fique com depth menor → desenhado
+ * antes → coberto pela fachada do prédio.
+ *
+ * O gRoof é desenhado em múltiplos Graphics, um por prédio, cada um com
+ * seu depth correto. Isso usa mais draw calls, mas é a única forma de
+ * intercalar o depth de objetos dinâmicos com o dos prédios numa cena
+ * Phaser que não suporta painters-sort automático entre Graphics e outros
+ * GameObjects.
  */
 export class CityWorld {
-    private g!: Phaser.GameObjects.Graphics;
-    private static readonly T = 64;   // tile size (world units)
+    // Camadas estáticas
+    private gGround!: Phaser.GameObjects.Graphics; // chão e ruas
+    private gBase!:   Phaser.GameObjects.Graphics; // objetos ao nível do chão
+
+    // Lista de Graphics de prédios (um por prédio, com depth correto)
+    private buildingGraphics: Phaser.GameObjects.Graphics[] = [];
+
+    private static readonly T = 64;
 
     constructor(private scene: Phaser.Scene) {}
 
     build() {
-        this.g = this.scene.add.graphics();
-        this.g.setDepth(-500);
+        // Camada do chão — sempre atrás de tudo
+        this.gGround = this.scene.add.graphics().setDepth(-500);
+        // Camada de base (estacionamentos, escombros, postes) — ao nível do chão
+        this.gBase   = this.scene.add.graphics().setDepth(-1);
 
         this.drawGround();
         this.drawRoads();
@@ -41,10 +59,9 @@ export class CityWorld {
         for (let gx = -HALF; gx < HALF; gx++) {
             for (let gy = -HALF; gy < HALF; gy++) {
                 const wx = gx * T, wy = gy * T;
-                // Variação sutil de cor baseada em posição
                 const n  = Math.sin(wx * 0.004 + wy * 0.007) * 5;
                 const c  = 26 + Math.round(n);
-                this.isoTile(wx, wy, T, T, Phaser.Display.Color.GetColor(c, c, c - 1));
+                this.isoTile(this.gGround, wx, wy, T, T, Phaser.Display.Color.GetColor(c, c, c - 1));
             }
         }
     }
@@ -55,8 +72,8 @@ export class CityWorld {
 
     private drawRoads() {
         const T     = CityWorld.T;
-        const BLOCK = 4;   // tiles de quarteirão
-        const ROAD  = 2;   // tiles de rua
+        const BLOCK = 4;
+        const ROAD  = 2;
         const STEP  = BLOCK + ROAD;
         const RANGE = 20;
 
@@ -71,10 +88,9 @@ export class CityWorld {
                 const wx = gx * T, wy = gy * T;
                 const isInt = isRX && isRY;
 
-                this.isoTile(wx, wy, T, T, isInt ? 0x1c1c1c : 0x191919);
+                this.isoTile(this.gGround, wx, wy, T, T, isInt ? 0x1c1c1c : 0x191919);
 
                 if (!isInt) {
-                    // Faixa tracejada
                     const steps = 6;
                     for (let s = 0; s < steps; s++) {
                         const t = (s / steps + 0.1);
@@ -82,24 +98,23 @@ export class CityWorld {
                         if (isRX) {
                             const { isoX: ax, isoY: ay } = cartesianToIso(wx + t * T, wy + T / 2);
                             const { isoX: bx, isoY: by } = cartesianToIso(wx + t2 * T, wy + T / 2);
-                            this.g.lineStyle(1, 0x3a3a28, 0.6);
-                            this.g.beginPath(); this.g.moveTo(ax, ay); this.g.lineTo(bx, by); this.g.strokePath();
+                            this.gGround.lineStyle(1, 0x3a3a28, 0.6);
+                            this.gGround.beginPath(); this.gGround.moveTo(ax, ay); this.gGround.lineTo(bx, by); this.gGround.strokePath();
                         } else {
                             const { isoX: ax, isoY: ay } = cartesianToIso(wx + T / 2, wy + t * T);
                             const { isoX: bx, isoY: by } = cartesianToIso(wx + T / 2, wy + t2 * T);
-                            this.g.lineStyle(1, 0x3a3a28, 0.6);
-                            this.g.beginPath(); this.g.moveTo(ax, ay); this.g.lineTo(bx, by); this.g.strokePath();
+                            this.gGround.lineStyle(1, 0x3a3a28, 0.6);
+                            this.gGround.beginPath(); this.gGround.moveTo(ax, ay); this.gGround.lineTo(bx, by); this.gGround.strokePath();
                         }
                     }
 
-                    // Calçadas nas bordas
                     const SW = 5;
                     if (isRX) {
-                        this.isoTile(wx, wy,          T, SW, 0x303030);
-                        this.isoTile(wx, wy + T - SW, T, SW, 0x303030);
+                        this.isoTile(this.gGround, wx, wy,          T, SW, 0x303030);
+                        this.isoTile(this.gGround, wx, wy + T - SW, T, SW, 0x303030);
                     } else {
-                        this.isoTile(wx,         wy, SW, T, 0x303030);
-                        this.isoTile(wx + T - SW, wy, SW, T, 0x303030);
+                        this.isoTile(this.gGround, wx,         wy, SW, T, 0x303030);
+                        this.isoTile(this.gGround, wx + T - SW, wy, SW, T, 0x303030);
                     }
                 }
             }
@@ -132,7 +147,7 @@ export class CityWorld {
                     this.blockRubble(ox, oy, T, BLOCK, rng);
                 }
 
-                // Postes nos cantos do bloco
+                // Postes — desenhados no gBase (decoração ao nível do chão)
                 this.streetlight(ox - T * 0.4,            oy - T * 0.4,            rng() < 0.65);
                 this.streetlight(ox + (BLOCK + 0.4) * T,  oy + (BLOCK + 0.4) * T,  rng() < 0.65);
                 this.streetlight(ox + (BLOCK + 0.4) * T,  oy - T * 0.4,            rng() < 0.5);
@@ -160,6 +175,11 @@ export class CityWorld {
         }
     }
 
+    /**
+     * FIX: Cada prédio cria seu próprio Graphics com depth = isoY_frente + altura.
+     * Isso garante que um player que passa por trás do prédio (isoY menor) fique
+     * com depth menor que o prédio → é desenhado atrás da fachada.
+     */
     private building(wx: number, wy: number, bw: number, bd: number, bh: number, destroyed: boolean, rng: () => number) {
         const palettes = [
             { side: 0x252530, dark: 0x1a1a20, top: 0x2e2e3a },
@@ -169,21 +189,31 @@ export class CityWorld {
         ];
         const pal = this.pick(palettes, rng);
 
-        this.isoBox(wx, wy, bw, bd, bh, pal.side, pal.dark, pal.top);
+        // FIX: calcula o depth do prédio a partir da borda da frente (isoY mais alto)
+        // A frente do prédio em isométrico é o vértice (wx, wy+bd) e (wx+bw, wy+bd)
+        // → depth = isoY dessa borda. Objetos que passam "atrás" terão isoY menor.
+        const frontIsoY = cartesianToIso(wx + bw / 2, wy + bd).isoY;
+        // Adicionar a altura visual: quanto mais alto o prédio, mais ele cobre objetos
+        // que estão "atrás" dele mesmo estando em isoY próximos.
+        const buildingDepth = frontIsoY + bh * 0.5;
+
+        // Cria um Graphics dedicado para este prédio com o depth correto
+        const g = this.scene.add.graphics().setDepth(buildingDepth);
+        this.buildingGraphics.push(g);
+
+        this.isoBoxG(g, wx, wy, bw, bd, bh, pal.side, pal.dark, pal.top);
 
         if (!destroyed) {
-            this.buildingWindows(wx, wy, bw, bd, bh, rng);
+            this.buildingWindowsG(g, wx, wy, bw, bd, bh, rng);
         } else {
-            this.debris(wx, wy, bw, bd, rng);
-            // Sombra de fumaça ao redor
+            this.debrisG(g, wx, wy, bw, bd, rng);
             const { isoX, isoY } = cartesianToIso(wx + bw / 2, wy + bd / 2);
-            this.g.fillStyle(0x050505, 0.35);
-            this.g.fillEllipse(isoX, isoY, bw * 1.2, bd * 0.5);
+            g.fillStyle(0x050505, 0.35);
+            g.fillEllipse(isoX, isoY, bw * 1.2, bd * 0.5);
         }
     }
 
-    private buildingWindows(wx: number, wy: number, bw: number, bd: number, bh: number, rng: () => number) {
-        // Janelas na face esquerda (visível)
+    private buildingWindowsG(g: Phaser.GameObjects.Graphics, wx: number, wy: number, bw: number, bd: number, bh: number, rng: () => number) {
         const cols = Math.max(1, Math.floor(bw / 20));
         const rows = Math.max(1, Math.floor(bh / 22));
         const wW = 10, wH = 14;
@@ -193,7 +223,7 @@ export class CityWorld {
         for (let c = 0; c < cols; c++) {
             for (let r = 0; r < rows; r++) {
                 const local_wx = wx + padX + c * (wW + padX);
-                const local_wy = wy + bd; // projetar na face esquerda
+                const local_wy = wy + bd;
                 const wTop     = bh - padY - r * (wH + 8);
                 if (wTop < wH) continue;
 
@@ -201,16 +231,14 @@ export class CityWorld {
                 const broken = rng() < 0.22;
                 const wCol   = broken ? 0x0c0c0c : lit ? 0xcc9922 : 0x0a0a12;
 
-                // A janela aparece na face lateral esquerda do box
                 const { isoX: px, isoY: py } = cartesianToIso(local_wx, local_wy);
-                this.g.fillStyle(wCol, 0.85);
-                // Face esquerda: inclinação isoY
+                g.fillStyle(wCol, 0.85);
                 const fx = px + c * 0.1;
-                this.g.fillRect(fx, py - wTop, wW * 0.55, wH * 0.55);
+                g.fillRect(fx, py - wTop, wW * 0.55, wH * 0.55);
 
                 if (lit) {
-                    this.g.fillStyle(0xcc9922, 0.07);
-                    this.g.fillCircle(fx + wW * 0.25, py - wTop, 16);
+                    g.fillStyle(0xcc9922, 0.07);
+                    g.fillCircle(fx + wW * 0.25, py - wTop, 16);
                 }
             }
         }
@@ -220,9 +248,8 @@ export class CityWorld {
 
     private blockParking(ox: number, oy: number, T: number, size: number, rng: () => number) {
         const total = size * T;
-        this.isoTile(ox, oy, total, total, 0x202020);
+        this.isoTile(this.gBase, ox, oy, total, total, 0x202020);
 
-        // Linhas de vagas
         const lanes = Math.floor(rng() * 2) + 2;
         for (let lane = 0; lane < lanes; lane++) {
             const lx = ox + (lane / lanes) * total;
@@ -230,23 +257,25 @@ export class CityWorld {
             for (let s = 0; s < spots; s++) {
                 const sy = oy + (s / spots) * total;
                 const sw = T * 0.7, sd = T * 0.9;
-                // Linha de vaga
-                this.g.lineStyle(1, 0x3a3a28, 0.5);
+                this.gBase.lineStyle(1, 0x3a3a28, 0.5);
                 const pts = [
                     cartesianToIso(lx,      sy),
                     cartesianToIso(lx + sw, sy),
                     cartesianToIso(lx + sw, sy + sd),
                     cartesianToIso(lx,      sy + sd),
                 ];
-                this.g.strokePoints(pts.map(p => ({ x: p.isoX, y: p.isoY })), true);
+                this.gBase.strokePoints(pts.map(p => ({ x: p.isoX, y: p.isoY })), true);
 
-                if (rng() < 0.65) this.car(lx + sw * 0.05, sy + sd * 0.05, sw * 0.9, sd * 0.9, rng);
+                if (rng() < 0.65) this.carG(this.gBase, lx + sw * 0.05, sy + sd * 0.05, sw * 0.9, sd * 0.9, rng);
             }
         }
 
-        // Mureta de contenção
-        this.isoBox(ox, oy, total, 5, 8, 0x3a3a3a, 0x282828, 0x484848);
-        this.isoBox(ox, oy + total - 5, total, 5, 8, 0x3a3a3a, 0x282828, 0x484848);
+        // Mureta de contenção — precisa de depth para ficar acima do chão
+        const muretaFrontY = cartesianToIso(ox + (size * T) / 2, oy + size * T).isoY;
+        const gMureta = this.scene.add.graphics().setDepth(muretaFrontY + 4);
+        this.buildingGraphics.push(gMureta);
+        this.isoBoxG(gMureta, ox, oy, total, 5, 8, 0x3a3a3a, 0x282828, 0x484848);
+        this.isoBoxG(gMureta, ox, oy + total - 5, total, 5, 8, 0x3a3a3a, 0x282828, 0x484848);
     }
 
     // ── Escombros ─────────────────────────────────────────────────────────────
@@ -256,7 +285,7 @@ export class CityWorld {
         for (let i = 0; i < size; i++) {
             for (let j = 0; j < size; j++) {
                 const v = Math.floor(rng() * 8);
-                this.isoTile(ox + i * T, oy + j * T, T, T,
+                this.isoTile(this.gBase, ox + i * T, oy + j * T, T, T,
                     Phaser.Display.Color.GetColor(18 + v, 15 + v, 12 + v));
             }
         }
@@ -267,56 +296,58 @@ export class CityWorld {
             const ry = oy + rng() * total;
             const pw = rng() * T * 0.7 + T * 0.15;
             const ph = rng() * 30 + 6;
-            this.debrisPile(rx, ry, pw, pw * 0.65, ph, rng);
+            // Cada pilha de escombro com seu depth
+            const pileFrontY = cartesianToIso(rx + pw / 2, ry + pw * 0.65).isoY;
+            const gPile = this.scene.add.graphics().setDepth(pileFrontY + ph * 0.5);
+            this.buildingGraphics.push(gPile);
+            this.debrisPileG(gPile, rx, ry, pw, pw * 0.65, ph, rng);
         }
 
-        // Poça
         if (rng() < 0.5) {
             const { isoX, isoY } = cartesianToIso(ox + rng() * total, oy + rng() * total);
             const r2 = rng() * 28 + 12;
-            this.g.fillStyle(0x08080f, 0.65);
-            this.g.fillEllipse(isoX, isoY, r2 * 2, r2 * 0.55);
-            this.g.fillStyle(0x1a2233, 0.12);
-            this.g.fillEllipse(isoX + 4, isoY - 3, r2 * 0.6, r2 * 0.2);
+            this.gBase.fillStyle(0x08080f, 0.65);
+            this.gBase.fillEllipse(isoX, isoY, r2 * 2, r2 * 0.55);
+            this.gBase.fillStyle(0x1a2233, 0.12);
+            this.gBase.fillEllipse(isoX + 4, isoY - 3, r2 * 0.6, r2 * 0.2);
         }
 
-        // Estrutura parcialmente em pé
         if (rng() < 0.4) {
             const rw = rng() * T + T * 0.5;
             const rd = T * 0.3;
             const rh = rng() * 50 + 20;
-            this.isoBox(ox + rng() * (total - rw), oy + rng() * (total - rd),
-                rw, rd, rh, 0x1e1c18, 0x141210, 0x2a2820);
+            const rx = ox + rng() * (total - rw);
+            const ry = oy + rng() * (total - rd);
+            const strFrontY = cartesianToIso(rx + rw / 2, ry + rd).isoY;
+            const gStr = this.scene.add.graphics().setDepth(strFrontY + rh * 0.5);
+            this.buildingGraphics.push(gStr);
+            this.isoBoxG(gStr, rx, ry, rw, rd, rh, 0x1e1c18, 0x141210, 0x2a2820);
         }
     }
 
     // ── Carro ─────────────────────────────────────────────────────────────────
 
-    private car(wx: number, wy: number, cw: number, cd: number, rng: () => number) {
+    private carG(g: Phaser.GameObjects.Graphics, wx: number, wy: number, cw: number, cd: number, rng: () => number) {
         const bodyPal = [0x14141e, 0x1e1010, 0x101e10, 0x201a08, 0x0e0e0e];
         const bCol = this.pick(bodyPal, rng);
         const tCol = Phaser.Display.Color.ValueToColor(bCol).lighten(10).color;
         const bH = cw * 0.55;
 
-        // Carroceria
-        this.isoBox(wx, wy, cw, cd, bH, bCol, bCol, tCol);
-        // Cabine
+        this.isoBoxG(g, wx, wy, cw, cd, bH, bCol, bCol, tCol);
         const cabW = cw * 0.65, cabD = cd * 0.5;
-        this.isoBox(wx + (cw - cabW) / 2, wy + (cd - cabD) / 2,
+        this.isoBoxG(g, wx + (cw - cabW) / 2, wy + (cd - cabD) / 2,
             cabW, cabD, bH * 1.45,
             tCol,
             Phaser.Display.Color.ValueToColor(tCol).darken(10).color,
             Phaser.Display.Color.ValueToColor(tCol).lighten(8).color,
         );
-        // Rodas
         const wW = cw * 0.15, wD = cd * 0.18, wH = bH * 0.22;
         for (const [ox2, oy2] of [[0, 0], [cw - wW, 0], [0, cd - wD], [cw - wW, cd - wD]]) {
-            this.isoBox(wx + ox2, wy + oy2, wW, wD, wH, 0x080808, 0x050505, 0x111111);
+            this.isoBoxG(g, wx + ox2, wy + oy2, wW, wD, wH, 0x080808, 0x050505, 0x111111);
         }
-        // Faróis apagados / quebrados
         const { isoX: hx, isoY: hy } = cartesianToIso(wx + cw, wy + cd * 0.25);
-        this.g.fillStyle(rng() < 0.3 ? 0x333322 : 0x111108, 0.8);
-        this.g.fillRect(hx - 3, hy - bH * 0.3, 5, 4);
+        g.fillStyle(rng() < 0.3 ? 0x333322 : 0x111108, 0.8);
+        g.fillRect(hx - 3, hy - bH * 0.3, 5, 4);
     }
 
     // ── Poste ─────────────────────────────────────────────────────────────────
@@ -324,41 +355,40 @@ export class CityWorld {
     private streetlight(wx: number, wy: number, on: boolean) {
         const { isoX, isoY } = cartesianToIso(wx, wy);
         const pH = 85;
+        // Poste tem depth baseado em sua posição
+        const g = this.scene.add.graphics().setDepth(isoY + pH);
+        this.buildingGraphics.push(g);
 
-        this.g.lineStyle(2, 0x2a3028, 1);
-        this.g.beginPath();
-        this.g.moveTo(isoX, isoY);
-        this.g.lineTo(isoX, isoY - pH);
-        this.g.strokePath();
+        g.lineStyle(2, 0x2a3028, 1);
+        g.beginPath();
+        g.moveTo(isoX, isoY);
+        g.lineTo(isoX, isoY - pH);
+        g.strokePath();
 
-        // Braço
-        this.g.lineStyle(2, 0x2a3028, 1);
-        this.g.beginPath();
-        this.g.moveTo(isoX, isoY - pH);
-        this.g.lineTo(isoX + 16, isoY - pH + 8);
-        this.g.strokePath();
+        g.lineStyle(2, 0x2a3028, 1);
+        g.beginPath();
+        g.moveTo(isoX, isoY - pH);
+        g.lineTo(isoX + 16, isoY - pH + 8);
+        g.strokePath();
 
         const lx = isoX + 16, ly = isoY - pH + 8;
 
         if (on) {
-            // Cápsula da lâmpada
-            this.g.fillStyle(0xffeebb, 1);
-            this.g.fillEllipse(lx, ly, 8, 5);
-            // Cone de luz — triângulo semitransparente
-            this.g.fillStyle(0xffee88, 0.035);
-            this.g.fillTriangle(lx - 4, ly + 2, lx + 4, ly + 2, lx, ly + 90);
-            // Halo
-            this.g.fillStyle(0xffdd66, 0.06);
-            this.g.fillCircle(lx, ly, 28);
+            g.fillStyle(0xffeebb, 1);
+            g.fillEllipse(lx, ly, 8, 5);
+            g.fillStyle(0xffee88, 0.035);
+            g.fillTriangle(lx - 4, ly + 2, lx + 4, ly + 2, lx, ly + 90);
+            g.fillStyle(0xffdd66, 0.06);
+            g.fillCircle(lx, ly, 28);
         } else {
-            this.g.fillStyle(0x222218, 1);
-            this.g.fillEllipse(lx, ly, 7, 4);
+            g.fillStyle(0x222218, 1);
+            g.fillEllipse(lx, ly, 7, 4);
         }
     }
 
     // ── Destroços ─────────────────────────────────────────────────────────────
 
-    private debris(wx: number, wy: number, bw: number, bd: number, rng: () => number) {
+    private debrisG(g: Phaser.GameObjects.Graphics, wx: number, wy: number, bw: number, bd: number, rng: () => number) {
         const pcs = Math.floor(rng() * 7) + 3;
         for (let i = 0; i < pcs; i++) {
             const dx = wx + (rng() - 0.3) * bw * 1.6;
@@ -368,16 +398,16 @@ export class CityWorld {
             const dh = rng() * 16 + 2;
             const c  = [0x2e2416, 0x262626, 0x1c1c1e, 0x301e10];
             const ci = Math.floor(rng() * c.length) % c.length;
-            this.isoBox(dx, dy, dw, dd, dh, c[ci], c[(ci + 1) % c.length],
+            this.isoBoxG(g, dx, dy, dw, dd, dh, c[ci], c[(ci + 1) % c.length],
                 Phaser.Display.Color.ValueToColor(c[ci]).lighten(6).color);
         }
     }
 
-    private debrisPile(wx: number, wy: number, pw: number, pd: number, ph: number, rng: () => number) {
+    private debrisPileG(g: Phaser.GameObjects.Graphics, wx: number, wy: number, pw: number, pd: number, ph: number, rng: () => number) {
         const c = 0x241e14;
-        this.isoBox(wx, wy, pw, pd, ph, c, 0x181410, Phaser.Display.Color.ValueToColor(c).lighten(10).color);
+        this.isoBoxG(g, wx, wy, pw, pd, ph, c, 0x181410, Phaser.Display.Color.ValueToColor(c).lighten(10).color);
         for (let i = 0; i < 3; i++) {
-            this.isoBox(
+            this.isoBoxG(g,
                 wx + (rng() - 0.5) * pw * 1.4,
                 wy + (rng() - 0.5) * pd * 1.4,
                 pw * 0.28, pd * 0.28, ph * 0.28 + 2,
@@ -391,118 +421,112 @@ export class CityWorld {
     // =========================================================================
 
     private drawAtmosphere() {
-        // Rachaduras no asfalto
         for (let i = 0; i < 80; i++) {
             const cx = (Math.random() - 0.5) * 3200;
             const cy = (Math.random() - 0.5) * 3200;
             this.crack(cx, cy);
         }
-        // Manchas de queimado / óleo
         for (let i = 0; i < 40; i++) {
             const cx = (Math.random() - 0.5) * 3200;
             const cy = (Math.random() - 0.5) * 3200;
             const { isoX, isoY } = cartesianToIso(cx, cy);
             const r = 20 + Math.random() * 50;
-            this.g.fillStyle(0x050505, 0.3 + Math.random() * 0.35);
-            this.g.fillEllipse(isoX, isoY, r * 2, r * 0.55);
+            this.gGround.fillStyle(0x050505, 0.3 + Math.random() * 0.35);
+            this.gGround.fillEllipse(isoX, isoY, r * 2, r * 0.55);
         }
-        // Lixo espalhado (pontinhos)
         for (let i = 0; i < 200; i++) {
             const cx = (Math.random() - 0.5) * 3000;
             const cy = (Math.random() - 0.5) * 3000;
             const { isoX, isoY } = cartesianToIso(cx, cy);
-            const lixoCols = [0x2a2418, 0x1e1c14, 0x241e18]; this.g.fillStyle(lixoCols[Math.floor(Math.random() * lixoCols.length) % lixoCols.length], 0.8);
-            this.g.fillRect(isoX, isoY, Math.random() * 4 + 1, Math.random() * 3 + 1);
+            const lixoCols = [0x2a2418, 0x1e1c14, 0x241e18];
+            this.gGround.fillStyle(lixoCols[Math.floor(Math.random() * lixoCols.length) % lixoCols.length], 0.8);
+            this.gGround.fillRect(isoX, isoY, Math.random() * 4 + 1, Math.random() * 3 + 1);
         }
     }
 
     private crack(cx: number, cy: number) {
         const segs = Math.floor(Math.random() * 5) + 2;
         let x = cx, y = cy;
-        this.g.lineStyle(1, 0x0e0e0e, 0.55);
-        this.g.beginPath();
+        this.gGround.lineStyle(1, 0x0e0e0e, 0.55);
+        this.gGround.beginPath();
         const start = cartesianToIso(x, y);
-        this.g.moveTo(start.isoX, start.isoY);
+        this.gGround.moveTo(start.isoX, start.isoY);
         for (let i = 0; i < segs; i++) {
             x += (Math.random() - 0.5) * 45;
             y += (Math.random() - 0.5) * 45;
             const { isoX, isoY } = cartesianToIso(x, y);
-            this.g.lineTo(isoX, isoY);
+            this.gGround.lineTo(isoX, isoY);
         }
-        this.g.strokePath();
+        this.gGround.strokePath();
     }
 
     // =========================================================================
     // Primitivos de baixo nível
     // =========================================================================
 
-    /** Tile flat (paralelogramo isométrico) */
-    private isoTile(wx: number, wy: number, w: number, d: number, color: number) {
+    /** Tile flat num Graphics específico */
+    private isoTile(g: Phaser.GameObjects.Graphics, wx: number, wy: number, w: number, d: number, color: number) {
         const p = [
             cartesianToIso(wx,     wy),
             cartesianToIso(wx + w, wy),
             cartesianToIso(wx + w, wy + d),
             cartesianToIso(wx,     wy + d),
         ];
-        this.g.fillStyle(color, 1);
-        this.g.beginPath();
-        this.g.moveTo(p[0].isoX, p[0].isoY);
-        p.slice(1).forEach(v => this.g.lineTo(v.isoX, v.isoY));
-        this.g.closePath();
-        this.g.fillPath();
+        g.fillStyle(color, 1);
+        g.beginPath();
+        g.moveTo(p[0].isoX, p[0].isoY);
+        p.slice(1).forEach(v => g.lineTo(v.isoX, v.isoY));
+        g.closePath();
+        g.fillPath();
     }
 
-    /**
-     * Caixa isométrica pseudo-3D.
-     * Renderiza: topo + face esquerda (mais clara) + face direita (mais escura).
-     * A ilusão de profundidade vem da diferença de luminosidade entre as faces.
-     */
-    private isoBox(
+    /** Caixa isométrica pseudo-3D num Graphics específico */
+    private isoBoxG(
+        g: Phaser.GameObjects.Graphics,
         wx: number, wy: number,
         bw: number, bd: number, bh: number,
         leftFace: number, rightFace: number, topFace: number,
     ) {
         if (bh <= 0) return;
 
-        // Vértices da base
         const tl = cartesianToIso(wx,      wy);
         const tr = cartesianToIso(wx + bw, wy);
         const br = cartesianToIso(wx + bw, wy + bd);
         const bl = cartesianToIso(wx,      wy + bd);
 
-        // ── Topo ──
-        this.g.fillStyle(topFace, 1);
-        this.g.beginPath();
-        this.g.moveTo(tl.isoX, tl.isoY - bh);
-        this.g.lineTo(tr.isoX, tr.isoY - bh);
-        this.g.lineTo(br.isoX, br.isoY - bh);
-        this.g.lineTo(bl.isoX, bl.isoY - bh);
-        this.g.closePath();
-        this.g.fillPath();
+        // Topo
+        g.fillStyle(topFace, 1);
+        g.beginPath();
+        g.moveTo(tl.isoX, tl.isoY - bh);
+        g.lineTo(tr.isoX, tr.isoY - bh);
+        g.lineTo(br.isoX, br.isoY - bh);
+        g.lineTo(bl.isoX, bl.isoY - bh);
+        g.closePath();
+        g.fillPath();
 
-        // ── Face esquerda (W→S, mais exposta) ──
-        this.g.fillStyle(leftFace, 1);
-        this.g.beginPath();
-        this.g.moveTo(bl.isoX, bl.isoY - bh);
-        this.g.lineTo(br.isoX, br.isoY - bh);
-        this.g.lineTo(br.isoX, br.isoY);
-        this.g.lineTo(bl.isoX, bl.isoY);
-        this.g.closePath();
-        this.g.fillPath();
+        // Face esquerda
+        g.fillStyle(leftFace, 1);
+        g.beginPath();
+        g.moveTo(bl.isoX, bl.isoY - bh);
+        g.lineTo(br.isoX, br.isoY - bh);
+        g.lineTo(br.isoX, br.isoY);
+        g.lineTo(bl.isoX, bl.isoY);
+        g.closePath();
+        g.fillPath();
 
-        // ── Face direita (N→E, em sombra) ──
-        this.g.fillStyle(rightFace, 1);
-        this.g.beginPath();
-        this.g.moveTo(tr.isoX, tr.isoY - bh);
-        this.g.lineTo(br.isoX, br.isoY - bh);
-        this.g.lineTo(br.isoX, br.isoY);
-        this.g.lineTo(tr.isoX, tr.isoY);
-        this.g.closePath();
-        this.g.fillPath();
+        // Face direita
+        g.fillStyle(rightFace, 1);
+        g.beginPath();
+        g.moveTo(tr.isoX, tr.isoY - bh);
+        g.lineTo(br.isoX, br.isoY - bh);
+        g.lineTo(br.isoX, br.isoY);
+        g.lineTo(tr.isoX, tr.isoY);
+        g.closePath();
+        g.fillPath();
 
-        // ── Aresta de silhueta (contorno fino do topo) ──
-        this.g.lineStyle(0.5, 0x000000, 0.25);
-        this.g.strokePoints([
+        // Aresta de silhueta
+        g.lineStyle(0.5, 0x000000, 0.25);
+        g.strokePoints([
             { x: tl.isoX, y: tl.isoY - bh },
             { x: tr.isoX, y: tr.isoY - bh },
             { x: br.isoX, y: br.isoY - bh },
@@ -512,19 +536,16 @@ export class CityWorld {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    // Escolhe item aleatório de array — nunca dá out-of-bounds mesmo se rng() → 1.0
     private pick<T>(arr: T[], rng: () => number): T {
         return arr[Math.floor(rng() * arr.length) % arr.length];
     }
 
     private makeRng(seed: number) {
-        // xorshift32 — período 2^32-1, resultado sempre em [0, 1)
-        // Nunca retorna 0 nem 1 exato, eliminando o bug de index out-of-bounds.
         let s = (seed ^ 0xdeadbeef) >>> 0 || 1;
         return () => {
             s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
-            s = s >>> 0;  // força uint32
-            return s / 4294967296; // divide por 2^32 → sempre em [0, 1)
+            s = s >>> 0;
+            return s / 4294967296;
         };
     }
 }
