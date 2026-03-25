@@ -7,27 +7,22 @@ import { ScoreManager } from '../entities/ScoreManager';
 import { VoteManager, VoteChoice } from '../entities/VoteManager';
 import { MultiplayerService } from '../network/Multiplayer';
 import { CityWorld } from '../world/CityWorld';
-import { cartesianToIso } from '../utils/IsoMath';
+import { AudioManager } from '../audio/AudioManager';
+import { cartesianToIso, isoToCartesian } from '../utils/IsoMath';
 
 interface PlayerData { x: number; y: number; speed: number; hp: number; }
 
 const HOST_PLAYER_ID = '__host__';
 
-/**
- * Cena principal.
- *
- * Fixes desta versao:
- *  - CityWorld.build() chamado APENAS dentro de onStartGame(), não em create().
- *    Isso evita o crash ao carregar a cena antes do jogador interagir.
- *  - EventBus.on('start-game') usa .on em vez de .once para suportar
- *    re-entrada apos voltar ao menu (once so dispara 1x por vida da cena)
- *  - Erro de conexao invalida: escuta 'connection-error' e reseta o menu
- *  - Background throttling: o heartbeatWorker usa setInterval no Worker
- *    (nao requestAnimationFrame), entao continua rodando minimizado.
- *    Alem disso, document.visibilitychange nao pausa mais a simulacao.
- *  - Zombis nao teleportam: interpolateClient usa lerpFactor suave (0.12)
- *    e setTarget so atualiza se o delta de posicao for razoavel (< 800px).
- */
+// ── Munição ──────────────────────────────────────────────────────────────────
+const MAG_SIZE        = 12;
+const RELOAD_TIME_MS  = 2200; // tempo de recarga em ms
+const SHOOT_COOLDOWN  = 120;  // ms entre tiros (cadência)
+
+// ── Escala do mundo ───────────────────────────────────────────────────────────
+// Zoom da câmera: 1.0 = padrão Phaser. Valores > 1 aproximam.
+const CAMERA_ZOOM = 1.6;
+
 export class Game extends Scene {
     // Entidades
     private localPlayer!: Player;
@@ -35,12 +30,16 @@ export class Game extends Scene {
     private bullets!: Phaser.Physics.Arcade.Group;
     private zombies!: ZombieManager;
     private cityWorld!: CityWorld;
-    private cityWorldBuilt = false;  // FIX: guard para não rebuildar em restart
+    private cityWorldBuilt = false;
+
+    // Paredes (colisão)
+    private walls!: Phaser.Physics.Arcade.StaticGroup;
 
     // Sistemas
     private horde!: HordeManager;
     private score!: ScoreManager;
     private vote!: VoteManager;
+    private audio!: AudioManager;
 
     // Rede
     private multiplayer!: MultiplayerService;
@@ -50,12 +49,21 @@ export class Game extends Scene {
     private readonly MIGRATION_THRESHOLD = 4000;
 
     // Estado local
-    private playerData: PlayerData = { x: 0, y: 0, speed: 250, hp: 100 };
+    private playerData: PlayerData = { x: 0, y: 0, speed: 220, hp: 100 };
     private lastDamageTime = 0;
     private isAlive = true;
     private isSpectating = false;
     private spectateTargetId = '';
     private myId = HOST_PLAYER_ID;
+
+    // Munição
+    private ammo         = MAG_SIZE;
+    private isReloading  = false;
+    private reloadTimer: Phaser.Time.TimerEvent | null = null;
+    private lastShootTime = 0;
+
+    // Passos
+    private isMoving = false;
 
     // Snapshots de rede
     private lastRemoteData: Map<string, { x: number; y: number }> = new Map();
@@ -63,11 +71,13 @@ export class Game extends Scene {
 
     // Input
     private wasd!: Record<string, Phaser.Input.Keyboard.Key>;
+    private reloadKey!: Phaser.Input.Keyboard.Key;
     private spectateKeys!: { left: Phaser.Input.Keyboard.Key; right: Phaser.Input.Keyboard.Key };
 
     // Timers
     private networkTimer!: Phaser.Time.TimerEvent;
     private heartbeatWorker: Worker | null = null;
+    private zombieGroanTimer = 0;
 
     // Guard: impede start-game ser processado enquanto ja conectando
     private isConnecting = false;
@@ -76,34 +86,29 @@ export class Game extends Scene {
 
     // =========================================================================
     create() {
-        // FIX: com audio.noAudio definido em main.ts, o Phaser não tenta mais
-        // suspender/resumir o AudioContext. Não precisamos mais remover os
-        // listeners de blur/focus — removê-los deixava o AudioContext em estado
-        // fechado e causava "Cannot suspend/resume a closed AudioContext".
-        // pauseOnBlur ainda é desativado para o jogo não pausar ao trocar de aba.
         this.sound.pauseOnBlur = false;
-
-        // Impede que visibilitychange pause o RAF do Phaser
         document.addEventListener('visibilitychange', this.onVisibilityChange);
-
         window.addEventListener('beforeunload', this.onBeforeUnload);
 
-        // FIX: CityWorld NÃO é construído aqui. Será construído na primeira
-        // chamada de onStartGame(), evitando o crash antes de qualquer interação.
         this.cityWorld = new CityWorld(this);
+        this.audio     = new AudioManager();
+
+        // Grupos de física
+        this.walls   = this.physics.add.staticGroup();
+        this.bullets = this.physics.add.group();
+        this.zombies = new ZombieManager(this);
 
         // Sistemas
         this.multiplayer = new MultiplayerService();
-        this.zombies     = new ZombieManager(this);
         this.horde       = new HordeManager();
         this.score       = new ScoreManager();
         this.vote        = new VoteManager();
-        this.bullets     = this.physics.add.group();
         this.localPlayer = new Player(this, 0, 0, true);
 
         // Input
         if (this.input.keyboard) {
             this.wasd = this.input.keyboard.addKeys('W,A,S,D') as Record<string, Phaser.Input.Keyboard.Key>;
+            this.reloadKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R);
             this.spectateKeys = {
                 left:  this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q),
                 right: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E),
@@ -111,7 +116,7 @@ export class Game extends Scene {
         }
         this.input.on('pointerdown', this.shoot, this);
 
-        // Colisoes
+        // Colisões
         this.physics.add.overlap(
             this.bullets, this.zombies.group,
             (_b, _z) => this.handleZombieHit(
@@ -124,41 +129,33 @@ export class Game extends Scene {
             this.handlePlayerZombieOverlap, undefined, this,
         );
 
-        // Timer de broadcast de rede (host)
+        // Timer de broadcast de rede
         this.networkTimer = this.time.addEvent({
             delay: 50, callback: this.sendNetworkUpdates,
             callbackScope: this, loop: true, paused: true,
         });
 
-        // Hooks do sistema de hordas
+        // Hooks horde
         this.horde.onSpawnZombie  = () => this.spawnZombieHost();
         this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
         this.horde.onWaveComplete = (wave)  => { this.score.onWaveComplete(wave); this.broadcastScores(); };
 
-        // Hooks de votacao
+        // Hooks votação
         this.vote.onRestart  = (staying) => this.handleVoteRestart(staying);
         this.vote.onAllLeave = () => {
             this.multiplayer.broadcast('session-end', {});
             EventBus.emit('session-end');
         };
 
-        // Worker para manter simulacao rodando em background (aba minimizada)
         this.initHeartbeatWorker();
-
-        // Eventos de rede
         this.setupNetworkEvents();
 
-        // FIX: usa .on (nao .once) para que o listener sobreviva a um retorno ao menu
-        // O guard isConnecting evita processamento duplo
-        EventBus.on('start-game', this.onStartGame, this);
+        EventBus.on('start-game',        this.onStartGame,      this);
+        EventBus.on('cast-vote',         this.onCastVote,       this);
+        EventBus.on('connection-error',  this.onConnectionError, this);
 
-        // Voto vindo do React
-        EventBus.on('cast-vote', this.onCastVote, this);
-
-        // FIX: escuta erro de conexao para resetar o loading no React
-        EventBus.on('connection-error', this.onConnectionError, this);
-
-        // Centraliza camera na origem (onde o player nasce)
+        // Zoom da câmera — mundo maior, mais detalhado
+        this.cameras.main.setZoom(CAMERA_ZOOM);
         this.cameras.main.centerOn(0, 0);
 
         EventBus.emit('current-scene-ready', this);
@@ -166,7 +163,6 @@ export class Game extends Scene {
 
     // =========================================================================
     update(_time: number, delta: number) {
-        // Não roda a lógica de jogo até o mundo estar construído
         if (!this.cityWorldBuilt) return;
 
         const TIMEOUT = 10_000;
@@ -184,6 +180,21 @@ export class Game extends Scene {
         if (this.isAlive) {
             this.processMovement(delta);
             this.aimAtPointer();
+
+            // Tecla R → recarga manual
+            if (this.reloadKey && Phaser.Input.Keyboard.JustDown(this.reloadKey)) {
+                this.startReload();
+            }
+
+            // Passos de áudio
+            this.audio.step(_time, this.isMoving);
+
+            // Gemidos de zumbi periódicos
+            this.zombieGroanTimer -= delta;
+            if (this.zombieGroanTimer <= 0 && this.zombies.zombiesMap.size > 0) {
+                this.audio.zombieGroan();
+                this.zombieGroanTimer = 2500 + Math.random() * 3000;
+            }
         } else if (this.isSpectating) {
             this.updateSpectator();
         }
@@ -199,12 +210,12 @@ export class Game extends Scene {
         this.horde.destroy();
         this.vote.destroy();
         this.multiplayer.destroy();
+        this.audio.destroy();
         this.cityWorldBuilt = false;
-        // Remove listeners especificos desta cena
-        EventBus.removeListener('start-game',      this.onStartGame);
-        EventBus.removeListener('cast-vote',       this.onCastVote);
+        EventBus.removeListener('start-game',       this.onStartGame);
+        EventBus.removeListener('cast-vote',        this.onCastVote);
         EventBus.removeListener('connection-error', this.onConnectionError);
-        EventBus.removeListener('network-data',    this.onNetworkData);
+        EventBus.removeListener('network-data',     this.onNetworkData);
         EventBus.removeListener('peer-disconnected', this.onPeerDisconnected);
     }
 
@@ -216,11 +227,11 @@ export class Game extends Scene {
         if (this.isConnecting) return;
         this.isConnecting = true;
 
-        // FIX: constrói o mundo AQUI, na primeira vez, após o clique do usuário.
-        // Isso garante que o Phaser Graphics está pronto e evita o crash em create().
         if (!this.cityWorldBuilt) {
             try {
                 this.cityWorld.build();
+                // Cria paredes de colisão baseadas nos edifícios do CityWorld
+                this.buildWalls();
                 this.cityWorldBuilt = true;
             } catch (err) {
                 console.error('[Game] Erro ao construir CityWorld:', err);
@@ -229,6 +240,11 @@ export class Game extends Scene {
                 return;
             }
         }
+
+        // Colisão do player com paredes
+        this.physics.add.collider(this.localPlayer, this.walls);
+        // Colisão dos zumbis com paredes
+        this.physics.add.collider(this.zombies.group, this.walls);
 
         this.isHost = data.isHost;
         this.lastHostHeartbeat = this.time.now;
@@ -244,15 +260,101 @@ export class Game extends Scene {
             this.isConnecting = false;
             EventBus.emit('room-joined', key);
         } else if (data.roomId) {
-            // joinGame pode emitir connection-error — o handler reseta isConnecting
             await this.multiplayer.joinGame(data.roomId);
-            this.myId  = this.multiplayer.myID;
+            this.myId   = this.multiplayer.myID;
             this.hostID = data.roomId;
-            // isConnecting = false sera chamado em onConnectionError ou quando room-joined disparar
             this.isConnecting = false;
         }
+
+        // Emite estado inicial de munição
+        this.emitAmmoState();
     };
 
+    // =========================================================================
+    // Paredes de colisão
+    // =========================================================================
+
+    /**
+     * Gera hitboxes invisíveis sobre os edifícios do CityWorld.
+     * Usa o mesmo grid/seed que CityWorld.placeBlocks() para coincidir.
+     * As paredes são StaticBodies alinhadas ao grid isométrico.
+     */
+    private buildWalls() {
+        const T     = 64;
+        const BLOCK = 4;
+        const STEP  = BLOCK + 2;
+        const RANGE = 4;
+
+        // RNG determinístico idêntico ao CityWorld
+        const makeRng = (seed: number) => {
+            let s = (seed ^ 0xdeadbeef) >>> 0 || 1;
+            return () => {
+                s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+                s = s >>> 0;
+                return s / 4294967296;
+            };
+        };
+
+        for (let bx = -RANGE; bx <= RANGE; bx++) {
+            for (let by = -RANGE; by <= RANGE; by++) {
+                const ox   = bx * STEP * T;
+                const oy   = by * STEP * T;
+                const seed = bx * 137 + by * 1009;
+                const rng  = makeRng(seed);
+                const type = rng();
+
+                if (type < 0.5) {
+                    // Quarteirão de edifícios — cria uma parede por quarteirão inteiro
+                    this.addWallBlock(ox, oy, BLOCK * T, BLOCK * T);
+                }
+                // Estacionamentos e escombros são passáveis
+            }
+        }
+    }
+
+    /**
+     * Adiciona um retângulo de colisão no espaço isométrico.
+     * Converte o centro cartesiano para ISO e cria um StaticBody achatado.
+     */
+    private addWallBlock(wx: number, wy: number, w: number, d: number) {
+        // Centro do bloco em espaço cartesiano
+        const cx = wx + w / 2;
+        const cy = wy + d / 2;
+        const { isoX, isoY } = cartesianToIso(cx, cy);
+
+        // A projeção isométrica acha o footprint: largura visual = w-d, altura = (w+d)/2
+        const isoW = (w + d);       // largura horizontal no ecrã
+        const isoH = (w + d) / 2;  // altura vertical no ecrã
+
+        const wall = this.add.rectangle(isoX, isoY, isoW, isoH, 0xff0000, 0);
+        this.physics.add.existing(wall, true); // true = static
+        this.walls.add(wall);
+    }
+
+    // =========================================================================
+    // Sistema de munição
+    // =========================================================================
+
+    private startReload() {
+        if (this.isReloading || this.ammo === MAG_SIZE) return;
+        this.isReloading = true;
+        this.audio.reloadStart();
+        EventBus.emit('ammo-state', { ammo: this.ammo, max: MAG_SIZE, reloading: true });
+
+        this.reloadTimer = this.time.delayedCall(RELOAD_TIME_MS, () => {
+            this.ammo = MAG_SIZE;
+            this.isReloading = false;
+            this.reloadTimer = null;
+            this.audio.reloadDone();
+            this.emitAmmoState();
+        });
+    }
+
+    private emitAmmoState() {
+        EventBus.emit('ammo-state', { ammo: this.ammo, max: MAG_SIZE, reloading: this.isReloading });
+    }
+
+    // =========================================================================
     private onCastVote = (choice: VoteChoice) => {
         if (this.isHost) this.vote.castVote(this.myId, choice);
         else this.multiplayer.broadcast('cast-vote', { choice });
@@ -260,7 +362,6 @@ export class Game extends Scene {
 
     private onConnectionError = (data: { reason: string }) => {
         this.isConnecting = false;
-        // Reseta o servico de rede para estado limpo
         this.multiplayer.destroy();
         EventBus.emit('connection-error-ui', data);
     };
@@ -274,19 +375,15 @@ export class Game extends Scene {
             this.heartbeatWorker = new Worker('/heartbeatWorker.js');
             this.heartbeatWorker.onmessage = (e) => {
                 if (e.data !== 'tick') return;
-                // Mesmo minimizado: host simula, cliente envia posicao
                 if (this.isHost) this.runHostBackgroundSimulation();
                 else             this.sendClientData();
             };
         } catch {
-            console.warn('[Game] heartbeatWorker nao encontrado — background sim desativada.');
+            console.warn('[Game] heartbeatWorker não encontrado — background sim desativada.');
         }
         this.events.once('destroy', () => this.heartbeatWorker?.terminate());
     }
 
-    // Impede Phaser de pausar o RAF ao minimizar.
-    // Capturar o evento sem fazer nada já evita que o handler padrão do Phaser
-    // pause o loop. A simulação continua via heartbeatWorker (Worker separado).
     private onVisibilityChange = () => { /* intencional: não pausar */ };
 
     // =========================================================================
@@ -308,10 +405,7 @@ export class Game extends Scene {
 
         switch (type) {
             case 'host-heartbeat': break;
-
-            case 'host-migration-start':
-                this.handleHostMigration(data.newHostID as string);
-                break;
+            case 'host-migration-start': this.handleHostMigration(data.newHostID as string); break;
 
             case 'player-joined':
                 if (this.isHost) {
@@ -321,40 +415,29 @@ export class Game extends Scene {
                 }
                 break;
 
-            case 'player-leaving':
-                this.removePlayer(from);
-                break;
-
-            case 'move':
-                this.handleRemoteMove(from, data);
-                break;
+            case 'player-leaving': this.removePlayer(from); break;
+            case 'move':           this.handleRemoteMove(from, data); break;
 
             case 'player-shoot':
-                this.createBullet(data.x as number, data.y as number, data.angle as number);
+                this.createBullet(data.x as number, data.y as number, data.angle as number, false);
                 break;
 
             case 'zombie-spawn':
                 if (!this.isHost)
-                    this.zombies.spawn(
-                        data.id as string,
-                        data.x  as number,
-                        data.y  as number,
-                        data.hp as number,
-                    );
+                    this.zombies.spawn(data.id as string, data.x as number, data.y as number, data.hp as number);
                 break;
 
             case 'zombie-update':
-                this.handleZombieUpdate(
-                    data.list as Array<{ id: string; isoX: number; isoY: number }>,
-                );
+                this.handleZombieUpdate(data.list as Array<{ id: string; isoX: number; isoY: number }>);
                 break;
 
             case 'zombie-death':
+                this.audio.zombieDeath();
                 this.zombies.remove(data.id as string);
                 break;
 
             case 'zombie-hit':
-                // Visual de hit nos clientes (nao afeta logica)
+                this.audio.zombieHit();
                 this.zombies.hit(data.id as string);
                 break;
 
@@ -366,10 +449,7 @@ export class Game extends Scene {
                 if (!this.isHost) this.score.applySnapshot(data.scores as any);
                 break;
 
-            case 'player-dead':
-                this.lastRemoteData.delete(from);
-                break;
-
+            case 'player-dead':       this.lastRemoteData.delete(from); break;
             case 'cast-vote':
                 if (this.isHost) this.vote.castVote(from, data.choice as VoteChoice);
                 break;
@@ -381,25 +461,11 @@ export class Game extends Scene {
                 }
                 break;
 
-            case 'vote-resolved':
-                this.handleVoteResolved(data.staying as string[]);
-                break;
-
-            case 'show-leaderboard':
-                EventBus.emit('show-leaderboard', data);
-                break;
-
-            case 'session-end':
-                EventBus.emit('session-end');
-                break;
-
-            case 'game-restart':
-                this.restartGame();
-                break;
-
-            default:
-                // Ignora silenciosamente tipos desconhecidos
-                break;
+            case 'vote-resolved':    this.handleVoteResolved(data.staying as string[]); break;
+            case 'show-leaderboard': EventBus.emit('show-leaderboard', data); break;
+            case 'session-end':      EventBus.emit('session-end'); break;
+            case 'game-restart':     this.restartGame(); break;
+            default: break;
         }
     };
 
@@ -428,7 +494,6 @@ export class Game extends Scene {
         this.multiplayer.startHostHeartbeat();
         this.networkTimer.paused = false;
         this.multiplayer.broadcast('host-migration-start', { newHostID: this.multiplayer.myID });
-        // Continua o horde de onde parou (nao reinicia)
         this.horde.onSpawnZombie  = () => this.spawnZombieHost();
         this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
         this.horde.onWaveComplete = (wave)  => { this.score.onWaveComplete(wave); this.broadcastScores(); };
@@ -438,13 +503,6 @@ export class Game extends Scene {
         this.removePlayer(this.hostID);
         this.hostID = newHostID;
         this.lastHostHeartbeat = this.time.now;
-    }
-
-    private startHostRole() {
-        this.isHost = true;
-        this.hostID = this.multiplayer.myID;
-        this.multiplayer.startHostHeartbeat();
-        this.networkTimer.paused = false;
     }
 
     // =========================================================================
@@ -479,8 +537,8 @@ export class Game extends Scene {
     private spawnZombieHost() {
         const id     = `z_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const angle  = Math.random() * Math.PI * 2;
-        const worldX = this.playerData.x + Math.cos(angle) * 600;
-        const worldY = this.playerData.y + Math.sin(angle) * 600;
+        const worldX = this.playerData.x + Math.cos(angle) * 500;
+        const worldY = this.playerData.y + Math.sin(angle) * 500;
         const hp     = this.horde.zombieHp;
         this.zombies.spawn(id, worldX, worldY, hp);
         this.multiplayer.broadcast('zombie-spawn', { id, x: worldX, y: worldY, hp });
@@ -492,7 +550,6 @@ export class Game extends Scene {
                 this.zombies.spawn(id, isoX, isoY);
             }
             if (!this.isHost) {
-                // FIX anti-teleporte: so aceita update se o delta for razoavel
                 const z = this.zombies.zombiesMap.get(id);
                 if (z) {
                     const dx = Math.abs(z.x - isoX);
@@ -500,7 +557,6 @@ export class Game extends Scene {
                     if (dx < 800 && dy < 800) {
                         this.zombies.setTarget(id, isoX, isoY);
                     } else {
-                        // Teleporte legitimo (spawn inicial distante) — aceita mas seta posicao direto
                         this.zombies.setPosition(id, isoX, isoY);
                     }
                 }
@@ -521,12 +577,14 @@ export class Game extends Scene {
 
         const died = this.zombies.hit(zombieId);
         if (died) {
+            this.audio.zombieDeath();
             this.score.addKill(this.myId, this.horde.wave);
             this.horde.onZombieDied();
             this.zombies.remove(zombieId);
             this.multiplayer.broadcast('zombie-death', { id: zombieId });
             this.broadcastScores();
         } else {
+            this.audio.zombieHit();
             this.multiplayer.broadcast('zombie-hit', { id: zombieId });
         }
     }
@@ -535,6 +593,7 @@ export class Game extends Scene {
         if (!this.isAlive || this.time.now <= this.lastDamageTime) return;
         this.playerData.hp = Math.max(0, this.playerData.hp - 10);
         this.lastDamageTime = this.time.now + 500;
+        this.audio.playerHurt();
         EventBus.emit('player-stats', { hp: this.playerData.hp });
         if (this.playerData.hp <= 0) this.playerDied();
     };
@@ -549,6 +608,7 @@ export class Game extends Scene {
         this.localPlayer.setVisible(false).setActive(false);
         (this.localPlayer.body as Phaser.Physics.Arcade.Body).enable = false;
         this.multiplayer.broadcast('player-dead', { id: this.myId });
+        this.audio.playerDeath();
         EventBus.emit('player-died', {});
         if (this.isHost) { this.score.markDead(this.myId); this.checkAllDead(); }
         this.startSpectating();
@@ -592,12 +652,11 @@ export class Game extends Scene {
     }
 
     // =========================================================================
-    // Votacao
+    // Votação
     // =========================================================================
 
     private handleVoteResolved(staying: string[]) {
         if (!staying.includes(this.myId)) {
-            // Volta ao menu: reseta servico de rede para novo uso
             this.multiplayer.destroy();
             EventBus.emit('session-end');
         }
@@ -615,17 +674,22 @@ export class Game extends Scene {
         this.horde.destroy();
         this.zombies.removeAll();
         this.score.reset();
-        this.isConnecting   = false;
-        this.playerData     = { x: 0, y: 0, speed: 250, hp: 100 };
-        this.isAlive        = true;
-        this.isSpectating   = false;
-        this.lastDamageTime = 0;
+        this.isConnecting    = false;
+        this.playerData      = { x: 0, y: 0, speed: 220, hp: 100 };
+        this.isAlive         = true;
+        this.isSpectating    = false;
+        this.lastDamageTime  = 0;
         this.spectateTargetId = '';
+        this.ammo            = MAG_SIZE;
+        this.isReloading     = false;
+        this.reloadTimer?.remove();
+        this.reloadTimer = null;
         this.localPlayer.setVisible(true).setActive(true);
         (this.localPlayer.body as Phaser.Physics.Arcade.Body).enable = true;
         this.localPlayer.setPosition(0, 0);
-        EventBus.emit('player-stats', { hp: 100 });
+        EventBus.emit('player-stats',  { hp: 100 });
         EventBus.emit('game-restarted', {});
+        this.emitAmmoState();
         if (this.isHost) {
             this.horde = new HordeManager();
             this.horde.onSpawnZombie  = () => this.spawnZombieHost();
@@ -636,7 +700,7 @@ export class Game extends Scene {
     }
 
     // =========================================================================
-    // Simulacao em background
+    // Simulação em background
     // =========================================================================
 
     private sendNetworkUpdates() {
@@ -687,12 +751,16 @@ export class Game extends Scene {
         if (this.wasd?.D?.isDown) mx += 1;
         if (this.wasd?.W?.isDown) my -= 1;
         if (this.wasd?.S?.isDown) my += 1;
-        if (mx !== 0 || my !== 0) {
+
+        this.isMoving = mx !== 0 || my !== 0;
+
+        if (this.isMoving) {
             const len = Math.hypot(mx, my);
             const dt  = delta / 1000;
             this.playerData.x += (mx / len) * this.playerData.speed * dt;
             this.playerData.y += (my / len) * this.playerData.speed * dt;
         }
+
         const { isoX, isoY } = cartesianToIso(this.playerData.x, this.playerData.y);
         this.localPlayer.setPosition(isoX, isoY).setDepth(isoY);
     }
@@ -706,22 +774,46 @@ export class Game extends Scene {
 
     private shoot() {
         if (!this.isAlive) return;
+
+        // Cadência
+        const now = this.time.now;
+        if (now - this.lastShootTime < SHOOT_COOLDOWN) return;
+        this.lastShootTime = now;
+
+        // Sem balas
+        if (this.ammo <= 0 || this.isReloading) {
+            if (!this.isReloading) {
+                this.audio.emptyClick();
+                this.startReload();
+            }
+            return;
+        }
+
+        this.ammo--;
+        this.emitAmmoState();
+        this.audio.shoot();
+
         const angle = this.localPlayer.rotation;
-        this.createBullet(this.playerData.x, this.playerData.y, angle);
+        this.createBullet(this.playerData.x, this.playerData.y, angle, true);
         this.multiplayer.broadcast('player-shoot', {
             x: this.playerData.x, y: this.playerData.y, angle,
         });
+
+        // Auto-recarga ao esvaziar o pente
+        if (this.ammo === 0) {
+            this.time.delayedCall(300, () => this.startReload());
+        }
     }
 
-    private createBullet(wx: number, wy: number, angle: number) {
+    private createBullet(wx: number, wy: number, angle: number, _local: boolean) {
         const { isoX, isoY } = cartesianToIso(wx, wy);
-        const bullet = this.add.circle(isoX, isoY, 5, 0xffee55);
+        const bullet = this.add.circle(isoX, isoY, 4, 0xffee22);
         this.physics.add.existing(bullet);
         this.bullets.add(bullet);
         const body = bullet.body as Phaser.Physics.Arcade.Body;
-        body.setSize(15, 15);
-        body.setVelocity(Math.cos(angle) * 900, (Math.sin(angle) * 900) / 2);
-        this.time.delayedCall(1000, () => { if (bullet.active) bullet.destroy(); });
+        body.setSize(10, 10);
+        body.setVelocity(Math.cos(angle) * 950, (Math.sin(angle) * 950) / 2);
+        this.time.delayedCall(900, () => { if (bullet.active) bullet.destroy(); });
     }
 
     // =========================================================================

@@ -24,17 +24,40 @@ function HealthBar({ hp }: { hp: number }) {
     );
 }
 
+// ─── Ammo Display ─────────────────────────────────────────────────────────────
+
+function AmmoDisplay({ ammo, max, reloading }: { ammo: number; max: number; reloading: boolean }) {
+    return (
+        <div className="hud-ammo-wrap">
+            <div className="hud-ammo-label">🔫</div>
+            {reloading ? (
+                <div className="hud-ammo-reloading">RECARREGANDO…</div>
+            ) : (
+                <div className="hud-ammo-bullets">
+                    {Array.from({ length: max }).map((_, i) => (
+                        <div
+                            key={i}
+                            className={`hud-ammo-bullet ${i < ammo ? 'full' : 'empty'}`}
+                        />
+                    ))}
+                </div>
+            )}
+            <div className="hud-ammo-count" style={{ color: ammo === 0 ? '#ff4444' : '#fff' }}>
+                {ammo}/{max}
+            </div>
+        </div>
+    );
+}
+
 // ─── Room Key (clicável para copiar) ─────────────────────────────────────────
 
 function RoomKey({ roomKey }: { roomKey: string }) {
     const [copied, setCopied] = useState(false);
 
     const copy = useCallback(async () => {
-        // Tenta Clipboard API moderna primeiro
         try {
             await navigator.clipboard.writeText(roomKey);
         } catch {
-            // Fallback universal — funciona em HTTP e em navegadores sem permissão
             const el = Object.assign(document.createElement('textarea'), {
                 value: roomKey, style: 'position:fixed;opacity:0;top:0;left:0',
             });
@@ -115,14 +138,16 @@ function SpectatorBanner({ targetId }: { targetId: string }) {
 
 // ─── HUD ─────────────────────────────────────────────────────────────────────
 
-function HUD({ hp, roomKey, scores, horde, isSpectating, spectateTarget }: {
+function HUD({ hp, roomKey, scores, horde, isSpectating, spectateTarget, ammo, ammoMax, reloading }: {
     hp: number; roomKey: string; scores: PlayerScore[];
     horde: HordeState | null; isSpectating: boolean; spectateTarget: string;
+    ammo: number; ammoMax: number; reloading: boolean;
 }) {
     return (
         <>
             <div className="hud-block hud-topleft">
                 <HealthBar hp={hp} />
+                <AmmoDisplay ammo={ammo} max={ammoMax} reloading={reloading} />
                 {roomKey && <RoomKey roomKey={roomKey} />}
             </div>
             <div className="hud-block hud-topcenter">
@@ -173,8 +198,6 @@ function LeaderboardScreen({ scores, vote, onVote }: {
     return (
         <div className="overlay leaderboard-overlay">
             <h1 className="lb-title">💀 TODOS MORRERAM</h1>
-
-            {/* Tabela */}
             <div className="lb-table-wrap">
                 <table className="lb-table">
                     <thead>
@@ -196,12 +219,8 @@ function LeaderboardScreen({ scores, vote, onVote }: {
                     </tbody>
                 </table>
             </div>
-
-            {/* Votação */}
             <div className="vote-area">
                 <p className="vote-question">O que deseja fazer?</p>
-
-                {/* Timer circular */}
                 <div className="vote-timer-wrap">
                     <svg viewBox="0 0 44 44" className="vote-timer-svg">
                         <circle cx="22" cy="22" r="18" fill="none" stroke="#1e1e2a" strokeWidth="4" />
@@ -221,12 +240,10 @@ function LeaderboardScreen({ scores, vote, onVote }: {
                     </svg>
                     <div className="vote-counter">{totalVotes}/{totalPlayers} votaram</div>
                 </div>
-
                 <div className="vote-buttons">
                     <VoteBtn choice="restart" current={myVote} onClick={handleVote} label="RECOMEÇAR" icon="🔄" />
                     <VoteBtn choice="leave"   current={myVote} onClick={handleVote} label="SAIR"      icon="🚪" />
                 </div>
-
                 {myVote && (
                     <p className="vote-feedback">
                         Voto: {myVote === 'restart' ? '🔄 Recomeçar' : '🚪 Sair'} · aguardando os outros…
@@ -244,7 +261,6 @@ function MainMenu() {
     const [loading, setLoading] = useState(false);
     const [error, setError]     = useState('');
 
-    // Escuta erros de conexão vindos do Game/Multiplayer
     useEffect(() => {
         const onErr = (d: { reason: string }) => {
             setLoading(false);
@@ -301,19 +317,23 @@ function MainMenu() {
 type Screen = 'menu' | 'game' | 'leaderboard';
 
 export default function App() {
-    const [screen,        setScreen]    = useState<Screen>('menu');
-    const [hp,            setHp]        = useState(100);
-    const [roomKey,       setRoomKey]   = useState('');
-    const [scores,        setScores]    = useState<PlayerScore[]>([]);
-    const [horde,         setHorde]     = useState<HordeState | null>(null);
-    const [isSpectating,  setSpect]     = useState(false);
-    const [spectTarget,   setSpectTgt]  = useState('');
-    const [voteState,     setVote]      = useState<VoteState | null>(null);
+    const [screen,       setScreen]  = useState<Screen>('menu');
+    const [hp,           setHp]      = useState(100);
+    const [roomKey,      setRoomKey] = useState('');
+    const [scores,       setScores]  = useState<PlayerScore[]>([]);
+    const [horde,        setHorde]   = useState<HordeState | null>(null);
+    const [isSpectating, setSpect]   = useState(false);
+    const [spectTarget,  setSpectTgt]= useState('');
+    const [voteState,    setVote]    = useState<VoteState | null>(null);
+    const [ammo,         setAmmo]    = useState(12);
+    const [ammoMax,      setAmmoMax] = useState(12);
+    const [reloading,    setReload]  = useState(false);
 
     const goMenu = useCallback(() => {
         setScreen('menu');
         setHp(100); setRoomKey(''); setScores([]);
         setHorde(null); setSpect(false); setVote(null);
+        setAmmo(12); setReload(false);
     }, []);
 
     useEffect(() => {
@@ -325,18 +345,20 @@ export default function App() {
             'spectate-target':  (d: { targetId: string }) => setSpectTgt(d.targetId),
             'horde-state':      (s: HordeState) => setHorde({ ...s }),
             'score-update':     (s: PlayerScore[]) => setScores([...s]),
+            'ammo-state':       (d: { ammo: number; max: number; reloading: boolean }) => {
+                setAmmo(d.ammo); setAmmoMax(d.max); setReload(d.reloading);
+            },
             'show-leaderboard': (d: { scores: PlayerScore[]; vote: VoteState }) => {
                 setScores([...d.scores]); setVote({ ...d.vote }); setScreen('leaderboard');
             },
             'vote-state':       (s: VoteState) => setVote({ ...s }),
-            // FIX: vote-resolved com staying vazio → voltar ao menu
             'vote-resolved':    (d: { staying: string[] }) => {
-                // Se ninguém fica (todos saem), volta ao menu
                 if (!d.staying || d.staying.length === 0) goMenu();
             },
             'session-end':      () => goMenu(),
             'game-restarted':   () => {
                 setScreen('game'); setHp(100); setSpect(false); setVote(null);
+                setAmmo(12); setReload(false);
             },
         };
 
@@ -352,7 +374,8 @@ export default function App() {
             {screen === 'menu'        && <MainMenu />}
             {screen === 'game'        && (
                 <HUD hp={hp} roomKey={roomKey} scores={scores}
-                     horde={horde} isSpectating={isSpectating} spectateTarget={spectTarget} />
+                     horde={horde} isSpectating={isSpectating} spectateTarget={spectTarget}
+                     ammo={ammo} ammoMax={ammoMax} reloading={reloading} />
             )}
             {screen === 'leaderboard' && (
                 <LeaderboardScreen scores={scores} vote={voteState} onVote={handleVote} />

@@ -26,12 +26,10 @@ const config: Phaser.Types.Core.GameConfig = {
             fps: 60,
         },
     },
-    // FIX: desabilita Web Audio completamente.
-    // O jogo não usa sons, então o AudioContext do Phaser não é necessário.
-    // Sem isso, o Phaser tenta suspender/resumir o AudioContext nos eventos
-    // blur/focus — mas como removemos esses listeners em Game.ts para evitar
-    // pausas ao trocar de aba, o contexto fica em estado inválido e lança:
-    // "Cannot suspend a closed AudioContext" / "Cannot resume a closed AudioContext"
+    // Audio do Phaser desabilitado — usamos Web Audio API diretamente
+    // via AudioManager.ts (sons procedurais sem arquivos externos).
+    // Isso evita os erros "Cannot suspend/resume a closed AudioContext"
+    // causados pelo gerenciamento interno do Phaser.
     audio: {
         noAudio: true,
     },
