@@ -113,4 +113,13 @@ export class ZombieManager {
         const z = this.zombiesMap.get(id);
         if (z) { z.setData('targetX', isoX); z.setData('targetY', isoY); }
     }
+
+    /** Posiciona o zombie diretamente (sem interpolacao) — usado em spawns distantes */
+    setPosition(id: string, isoX: number, isoY: number) {
+        const z = this.zombiesMap.get(id);
+        if (!z) return;
+        z.setPosition(isoX, isoY);
+        z.setData('targetX', isoX);
+        z.setData('targetY', isoY);
+    }
 }

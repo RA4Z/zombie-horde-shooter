@@ -244,6 +244,16 @@ function MainMenu() {
     const [loading, setLoading] = useState(false);
     const [error, setError]     = useState('');
 
+    // Escuta erros de conexão vindos do Game/Multiplayer
+    useEffect(() => {
+        const onErr = (d: { reason: string }) => {
+            setLoading(false);
+            setError(d.reason ?? 'Erro de conexão.');
+        };
+        EventBus.on('connection-error-ui', onErr);
+        return () => { EventBus.removeListener('connection-error-ui', onErr); };
+    }, []);
+
     const host = () => { setLoading(true); setError(''); EventBus.emit('start-game', { isHost: true }); };
     const join = () => {
         const k = joinKey.trim();
@@ -252,25 +262,36 @@ function MainMenu() {
         EventBus.emit('start-game', { isHost: false, roomId: k });
     };
 
-    if (loading) return <div className="menu"><div className="menu-loading">Conectando…</div></div>;
-
     return (
         <div className="menu">
             <div className="menu-skull">💀</div>
             <h1 className="menu-title">DEAD CITY</h1>
             <p className="menu-sub">Multiplayer · Hordas Infinitas</p>
-            <button className="btn-primary" onClick={host}>CRIAR SALA (HOST)</button>
-            <div className="menu-or"><span>ou</span></div>
-            <input
-                className="menu-input"
-                value={joinKey}
-                onChange={e => setJoinKey(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && join()}
-                placeholder="Cole a chave do host aqui"
-                maxLength={64} spellCheck={false} autoComplete="off"
-            />
-            <button className="btn-secondary" onClick={join}>ENTRAR NA SESSÃO</button>
-            {error && <p className="menu-error">{error}</p>}
+
+            {loading ? (
+                <>
+                    <div className="menu-loading">Conectando…</div>
+                    <button className="btn-secondary" style={{ marginTop: 8, width: 160, fontSize: 12 }}
+                        onClick={() => { setLoading(false); EventBus.emit('cancel-connect'); }}>
+                        Cancelar
+                    </button>
+                </>
+            ) : (
+                <>
+                    <button className="btn-primary" onClick={host}>CRIAR SALA (HOST)</button>
+                    <div className="menu-or"><span>ou</span></div>
+                    <input
+                        className="menu-input"
+                        value={joinKey}
+                        onChange={e => setJoinKey(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && join()}
+                        placeholder="Cole a chave do host aqui"
+                        maxLength={64} spellCheck={false} autoComplete="off"
+                    />
+                    <button className="btn-secondary" onClick={join}>ENTRAR NA SESSÃO</button>
+                    {error && <p className="menu-error">⚠ {error}</p>}
+                </>
+            )}
         </div>
     );
 }

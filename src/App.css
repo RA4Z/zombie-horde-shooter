@@ -4,8 +4,18 @@ html, body, #root, #app {
     width: 100vw; height: 100vh; overflow: hidden;
     background: #000; font-family: 'Segoe UI', system-ui, sans-serif;
 }
-#game-container { width: 100%; height: 100%; }
-canvas { display: block; }
+#game-container {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+}
+#game-container canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+}
 
 /* ── HUD shared block ────────────────────────────────────────────────────── */
 .hud-block {
