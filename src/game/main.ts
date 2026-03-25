@@ -5,11 +5,6 @@ import { MainMenu }         from './scenes/MainMenu';
 import { Game as MainGame } from './scenes/Game';
 import { GameOver }         from './scenes/GameOver';
 
-/**
- * FIX: scale mode RESIZE faz o canvas ocupar 100% da janela
- * e se adaptar quando ela for redimensionada.
- * Removido width/height fixos — o Phaser usa o tamanho real do container.
- */
 const config: Phaser.Types.Core.GameConfig = {
     type: AUTO,
     parent: 'game-container',
@@ -30,6 +25,15 @@ const config: Phaser.Types.Core.GameConfig = {
             debug: false,
             fps: 60,
         },
+    },
+    // FIX: desabilita Web Audio completamente.
+    // O jogo não usa sons, então o AudioContext do Phaser não é necessário.
+    // Sem isso, o Phaser tenta suspender/resumir o AudioContext nos eventos
+    // blur/focus — mas como removemos esses listeners em Game.ts para evitar
+    // pausas ao trocar de aba, o contexto fica em estado inválido e lança:
+    // "Cannot suspend a closed AudioContext" / "Cannot resume a closed AudioContext"
+    audio: {
+        noAudio: true,
     },
     scene: [Boot, Preloader, MainMenu, MainGame, GameOver],
 };

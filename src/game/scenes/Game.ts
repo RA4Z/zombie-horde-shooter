@@ -17,7 +17,8 @@ const HOST_PLAYER_ID = '__host__';
  * Cena principal.
  *
  * Fixes desta versao:
- *  - CityWorld.build() chamado em create() com camera inicial correta
+ *  - CityWorld.build() chamado APENAS dentro de onStartGame(), não em create().
+ *    Isso evita o crash ao carregar a cena antes do jogador interagir.
  *  - EventBus.on('start-game') usa .on em vez de .once para suportar
  *    re-entrada apos voltar ao menu (once so dispara 1x por vida da cena)
  *  - Erro de conexao invalida: escuta 'connection-error' e reseta o menu
@@ -34,6 +35,7 @@ export class Game extends Scene {
     private bullets!: Phaser.Physics.Arcade.Group;
     private zombies!: ZombieManager;
     private cityWorld!: CityWorld;
+    private cityWorldBuilt = false;  // FIX: guard para não rebuildar em restart
 
     // Sistemas
     private horde!: HordeManager;
@@ -74,20 +76,21 @@ export class Game extends Scene {
 
     // =========================================================================
     create() {
-        // Previne pausa ao trocar de aba (Phaser nativo)
+        // FIX: com audio.noAudio definido em main.ts, o Phaser não tenta mais
+        // suspender/resumir o AudioContext. Não precisamos mais remover os
+        // listeners de blur/focus — removê-los deixava o AudioContext em estado
+        // fechado e causava "Cannot suspend/resume a closed AudioContext".
+        // pauseOnBlur ainda é desativado para o jogo não pausar ao trocar de aba.
         this.sound.pauseOnBlur = false;
-        this.game.events.removeAllListeners('blur');
-        this.game.events.removeAllListeners('focus');
 
         // Impede que visibilitychange pause o RAF do Phaser
         document.addEventListener('visibilitychange', this.onVisibilityChange);
 
         window.addEventListener('beforeunload', this.onBeforeUnload);
 
-        // Mundo da cidade — deve ser criado ANTES dos outros objetos
-        // para ficar na camada mais baixa (depth -500 definido em CityWorld)
+        // FIX: CityWorld NÃO é construído aqui. Será construído na primeira
+        // chamada de onStartGame(), evitando o crash antes de qualquer interação.
         this.cityWorld = new CityWorld(this);
-        this.cityWorld.build();
 
         // Sistemas
         this.multiplayer = new MultiplayerService();
@@ -163,6 +166,9 @@ export class Game extends Scene {
 
     // =========================================================================
     update(_time: number, delta: number) {
+        // Não roda a lógica de jogo até o mundo estar construído
+        if (!this.cityWorldBuilt) return;
+
         const TIMEOUT = 10_000;
         this.lastSeenMap.forEach((t, id) => {
             if (_time - t > TIMEOUT) this.removePlayer(id);
@@ -193,6 +199,7 @@ export class Game extends Scene {
         this.horde.destroy();
         this.vote.destroy();
         this.multiplayer.destroy();
+        this.cityWorldBuilt = false;
         // Remove listeners especificos desta cena
         EventBus.removeListener('start-game',      this.onStartGame);
         EventBus.removeListener('cast-vote',       this.onCastVote);
@@ -208,6 +215,20 @@ export class Game extends Scene {
     private onStartGame = async (data: { isHost: boolean; roomId?: string }) => {
         if (this.isConnecting) return;
         this.isConnecting = true;
+
+        // FIX: constrói o mundo AQUI, na primeira vez, após o clique do usuário.
+        // Isso garante que o Phaser Graphics está pronto e evita o crash em create().
+        if (!this.cityWorldBuilt) {
+            try {
+                this.cityWorld.build();
+                this.cityWorldBuilt = true;
+            } catch (err) {
+                console.error('[Game] Erro ao construir CityWorld:', err);
+                this.isConnecting = false;
+                EventBus.emit('connection-error-ui', { reason: 'Erro ao carregar o mundo. Recarregue a página.' });
+                return;
+            }
+        }
 
         this.isHost = data.isHost;
         this.lastHostHeartbeat = this.time.now;
@@ -263,13 +284,10 @@ export class Game extends Scene {
         this.events.once('destroy', () => this.heartbeatWorker?.terminate());
     }
 
-    // Impede Phaser de pausar o RAF ao minimizar
-    private onVisibilityChange = () => {
-        if (document.hidden) {
-            // Forcamos o loop a continuar via requestAnimationFrame
-            this.game.loop.sleep();   // marca como sleep mas nao para
-        }
-    };
+    // Impede Phaser de pausar o RAF ao minimizar.
+    // Capturar o evento sem fazer nada já evita que o handler padrão do Phaser
+    // pause o loop. A simulação continua via heartbeatWorker (Worker separado).
+    private onVisibilityChange = () => { /* intencional: não pausar */ };
 
     // =========================================================================
     // Rede

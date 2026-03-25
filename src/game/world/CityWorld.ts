@@ -167,7 +167,7 @@ export class CityWorld {
             { side: 0x1a2020, dark: 0x141818, top: 0x222a2a },
             { side: 0x28201a, dark: 0x1c1610, top: 0x342a20 },
         ];
-        const pal = palettes[Math.floor(rng() * palettes.length)];
+        const pal = this.pick(palettes, rng);
 
         this.isoBox(wx, wy, bw, bd, bh, pal.side, pal.dark, pal.top);
 
@@ -294,7 +294,7 @@ export class CityWorld {
 
     private car(wx: number, wy: number, cw: number, cd: number, rng: () => number) {
         const bodyPal = [0x14141e, 0x1e1010, 0x101e10, 0x201a08, 0x0e0e0e];
-        const bCol = bodyPal[Math.floor(rng() * bodyPal.length)];
+        const bCol = this.pick(bodyPal, rng);
         const tCol = Phaser.Display.Color.ValueToColor(bCol).lighten(10).color;
         const bH = cw * 0.55;
 
@@ -367,7 +367,7 @@ export class CityWorld {
             const dd = rng() * 18 + 4;
             const dh = rng() * 16 + 2;
             const c  = [0x2e2416, 0x262626, 0x1c1c1e, 0x301e10];
-            const ci = Math.floor(rng() * c.length);
+            const ci = Math.floor(rng() * c.length) % c.length;
             this.isoBox(dx, dy, dw, dd, dh, c[ci], c[(ci + 1) % c.length],
                 Phaser.Display.Color.ValueToColor(c[ci]).lighten(6).color);
         }
@@ -411,7 +411,7 @@ export class CityWorld {
             const cx = (Math.random() - 0.5) * 3000;
             const cy = (Math.random() - 0.5) * 3000;
             const { isoX, isoY } = cartesianToIso(cx, cy);
-            this.g.fillStyle([0x2a2418, 0x1e1c14, 0x241e18][Math.floor(Math.random() * 3)], 0.8);
+            const lixoCols = [0x2a2418, 0x1e1c14, 0x241e18]; this.g.fillStyle(lixoCols[Math.floor(Math.random() * lixoCols.length) % lixoCols.length], 0.8);
             this.g.fillRect(isoX, isoY, Math.random() * 4 + 1, Math.random() * 3 + 1);
         }
     }
@@ -512,11 +512,19 @@ export class CityWorld {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // Escolhe item aleatório de array — nunca dá out-of-bounds mesmo se rng() → 1.0
+    private pick<T>(arr: T[], rng: () => number): T {
+        return arr[Math.floor(rng() * arr.length) % arr.length];
+    }
+
     private makeRng(seed: number) {
-        let s = seed + 1;
+        // xorshift32 — período 2^32-1, resultado sempre em [0, 1)
+        // Nunca retorna 0 nem 1 exato, eliminando o bug de index out-of-bounds.
+        let s = (seed ^ 0xdeadbeef) >>> 0 || 1;
         return () => {
-            s = (s * 16807) % 2147483647;
-            return (s - 1) / 2147483646;
+            s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+            s = s >>> 0;  // força uint32
+            return s / 4294967296; // divide por 2^32 → sempre em [0, 1)
         };
     }
 }
