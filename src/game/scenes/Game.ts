@@ -52,9 +52,6 @@ export class Game extends Scene {
     private reloadTimer: Phaser.Time.TimerEvent | null = null;
     private lastShootTime = 0;
     private isMoving = false;
-
-    // Ângulo de mira em espaço CARTESIANO (não ISO).
-    // Calculado convertendo o ponto de mira ISO→cartesiano.
     private aimAngleCart = 0;
 
     private lastRemoteData: Map<string, { x: number; y: number }> = new Map();
@@ -68,6 +65,9 @@ export class Game extends Scene {
     private heartbeatWorker: Worker | null = null;
     private zombieGroanTimer = 0;
     private isConnecting = false;
+
+    // FIX: guard para impedir que session-end seja processado múltiplas vezes
+    private sessionEnded = false;
 
     constructor() { super('Game'); }
 
@@ -124,7 +124,7 @@ export class Game extends Scene {
         this.vote.onRestart  = (staying) => this.handleVoteRestart(staying);
         this.vote.onAllLeave = () => {
             this.multiplayer.broadcast('session-end', {});
-            EventBus.emit('session-end');
+            this.endSession();
         };
 
         this.initHeartbeatWorker();
@@ -155,13 +155,10 @@ export class Game extends Scene {
         }
 
         if (this.isAlive) {
-            this.aimAtPointer();          // 1. calcula aimAngleCart
-            this.processMovement(delta);  // 2. usa aimAngleCart para mover
-
+            this.aimAtPointer();
+            this.processMovement(delta);
             if (this.reloadKey && Phaser.Input.Keyboard.JustDown(this.reloadKey)) this.startReload();
-
             this.audio.step(_time, this.isMoving);
-
             this.zombieGroanTimer -= delta;
             if (this.zombieGroanTimer <= 0 && this.zombies.zombiesMap.size > 0) {
                 this.audio.zombieGroan();
@@ -185,6 +182,7 @@ export class Game extends Scene {
         this.multiplayer.destroy();
         this.audio.destroy();
         this.cityWorldBuilt = false;
+        this.sessionEnded   = false;
         EventBus.removeListener('start-game',        this.onStartGame);
         EventBus.removeListener('cast-vote',         this.onCastVote);
         EventBus.removeListener('connection-error',  this.onConnectionError);
@@ -198,7 +196,8 @@ export class Game extends Scene {
 
     private onStartGame = async (data: { isHost: boolean; roomId?: string; name?: string }) => {
         if (this.isConnecting) return;
-        this.isConnecting = true;
+        this.isConnecting  = true;
+        this.sessionEnded  = false;
 
         if (data.name) this.myName = data.name.trim().slice(0, 16) || 'Player';
         this.localPlayer.setNameLabel(this.myName);
@@ -216,6 +215,7 @@ export class Game extends Scene {
             }
         }
 
+        // Registra colisões (pode ser chamado múltiplas vezes sem problema)
         this.physics.add.collider(this.localPlayer, this.walls);
         this.physics.add.collider(this.zombies.group, this.walls);
 
@@ -244,29 +244,20 @@ export class Game extends Scene {
     };
 
     // =========================================================================
-    // Paredes — hitboxes alinhadas ao CityWorld
+    // Paredes — hitbox sólida por QUARTEIRÃO inteiro (abordagem robusta)
     // =========================================================================
+    //
+    // A abordagem de replicar a RNG do CityWorld para cada prédio individual
+    // é frágil: qualquer divergência na sequência de rng() faz as hitboxes
+    // descasarem do visual. A abordagem mais robusta é: cobrir o quarteirão
+    // inteiro com uma única hitbox sólida quando ele for do tipo "prédios".
+    // O footprint total do quarteirão é exatamente BLOCK×T × BLOCK×T.
+    // Isso garante 100% de cobertura sem depender da sincronização de RNG.
+    //
+    // Custo: alguns pixels de gap entre prédios no mesmo quarteirão ficam
+    // bloqueados também — mas isso é imperceptível e muito menos frustrante
+    // do que conseguir atravessar por divergência de hitbox.
 
-    /**
-     * Replica EXATAMENTE a sequência de rng() que CityWorld.blockBuildings()
-     * e CityWorld.building() consomem, para que as hitboxes coincidam
-     * pixel a pixel com os prédios desenhados.
-     *
-     * Sequência por prédio em CityWorld:
-     *   bw  = rng() via Math.floor(rng()*2)+1   → 1 chamada
-     *   bd  = rng() via Math.floor(rng()*2)+1   → 1 chamada
-     *   destroyed = rng() < 0.28               → 1 chamada
-     *   rawH = 45 + rng()*90                   → 1 chamada
-     *   bh (se destroyed): rng()*0.4           → 1 chamada  (só se destroyed)
-     *   building() → pick(palettes, rng)       → 1 chamada
-     *   se destroyed  → debris() → rng()×N (não afeta hitbox, consumido abaixo)
-     *   se !destroyed → buildingWindows() → rng() por janela (lit, broken)
-     *   avanço: rng() < 0.25                   → 1 chamada
-     *
-     * Para não precisar simular buildingWindows inteira, usamos uma abordagem
-     * mais simples: cobrimos o quarteirão inteiro com uma hitbox única por bloco.
-     * Isso é mais robusto a divergências de RNG e garante 100% de cobertura.
-     */
     private buildWalls() {
         const T     = 64;
         const BLOCK = 4;
@@ -287,58 +278,13 @@ export class Game extends Scene {
                 const type = rng();
 
                 if (type < 0.5) {
-                    // Bloco de prédios: uma hitbox sólida por prédio individual
-                    this.addBuildingWalls(ox, oy, T, BLOCK, rng);
+                    // Quarteirão de prédios → hitbox sólida cobrindo o bloco inteiro
+                    const totalW = BLOCK * T;
+                    const totalD = BLOCK * T;
+                    this.addWallBlock(ox, oy, totalW, totalD);
                 }
-                // Estacionamentos (0.5–0.75) e escombros (0.75–1.0) são passáveis
+                // Estacionamentos e escombros são passáveis
             }
-        }
-    }
-
-    /**
-     * Gera hitboxes individuais para cada prédio, consumindo a RNG
-     * na mesma ordem que CityWorld.blockBuildings() faz.
-     */
-    private addBuildingWalls(ox: number, oy: number, T: number, size: number, rng: () => number) {
-        const total = size * T;
-        let cx = ox;
-        while (cx < ox + total - T * 0.5) {
-            // Mesmo que CityWorld.blockBuildings
-            const bw = (Math.floor(rng() * 2) + 1) * T;
-            const bd = (Math.floor(rng() * 2) + 1) * T;
-            if (cx + bw > ox + total + T * 0.3) break;
-
-            const destroyed = rng() < 0.28;  // rng #3
-            rng();                            // rng #4 — rawH (não usado aqui)
-            if (destroyed) rng();             // rng #5 — factor de bh (só se destroyed)
-
-            // building() → pick(palettes, rng) → rng #5 ou #6
-            rng(); // palette pick
-
-            if (destroyed) {
-                // debris() — consome rng para cada peça: pcs = floor(rng()*7)+3
-                const pcs = Math.floor(rng() * 7) + 3;
-                for (let i = 0; i < pcs; i++) {
-                    rng(); rng(); rng(); rng(); rng(); rng(); // dx,dy,dw,dd,dh,ci
-                }
-                // sombra de fumaça — sem rng
-            } else {
-                // buildingWindows() — consome rng por janela (lit, broken)
-                const cols = Math.max(1, Math.floor(bw / 20));
-                const rows = Math.max(1, Math.floor((45 + 45) / 22)); // estimativa conservadora
-                for (let c = 0; c < cols; c++) {
-                    for (let r = 0; r < rows; r++) {
-                        rng(); // lit
-                        rng(); // broken
-                    }
-                }
-            }
-
-            // Cria a hitbox para este prédio
-            this.addWallBlock(cx, oy, bw, bd);
-
-            // avanço — rng #N
-            cx += bw + (rng() < 0.25 ? T * 0.4 : 0);
         }
     }
 
@@ -346,8 +292,12 @@ export class Game extends Scene {
         const cx = wx + w / 2;
         const cy = wy + d / 2;
         const { isoX, isoY } = cartesianToIso(cx, cy);
+
+        // Hitbox isométrica: losango que cobre todo o footprint
+        // Largura ISO = w + d, Altura ISO = (w + d) / 2
         const isoW = w + d;
         const isoH = (w + d) / 2;
+
         const wall = this.add.rectangle(isoX, isoY, isoW, isoH, 0x000000, 0);
         this.physics.add.existing(wall, true);
         this.walls.add(wall);
@@ -501,8 +451,11 @@ export class Game extends Scene {
 
             case 'vote-resolved':    this.handleVoteResolved(data.staying as string[]); break;
             case 'show-leaderboard': EventBus.emit('show-leaderboard', data); break;
-            case 'session-end':      EventBus.emit('session-end'); break;
-            case 'game-restart':     this.restartGame(); break;
+
+            // FIX: session-end recebido pela rede → encerra sessão corretamente
+            case 'session-end': this.endSession(); break;
+
+            case 'game-restart': this.restartGame(); break;
         }
     };
 
@@ -657,10 +610,7 @@ export class Game extends Scene {
             this.score.markAlive(id);
             this.multiplayer.broadcast('player-revived', { id });
             const remote = this.remotePlayers.get(id);
-            if (remote) {
-                remote.setVisible(true).setActive(true);
-                (remote.body as Phaser.Physics.Arcade.Body).enable = true;
-            }
+            if (remote) { remote.setVisible(true).setActive(true); (remote.body as Phaser.Physics.Arcade.Body).enable = true; }
         });
     }
 
@@ -712,21 +662,63 @@ export class Game extends Scene {
     // Votação
     // =========================================================================
 
+    /**
+     * FIX: endSession() centraliza toda a lógica de encerramento de sessão.
+     * Antes, session-end podia ser emitido/recebido múltiplas vezes causando
+     * estado congelado. O guard sessionEnded garante execução única.
+     */
+    private endSession() {
+        if (this.sessionEnded) return;
+        this.sessionEnded = true;
+
+        // Para todos os sistemas ativos
+        this.horde.destroy();
+        this.vote.destroy();
+        this.networkTimer.paused = true;
+        this.multiplayer.stopHostHeartbeat();
+        this.zombies.removeAll();
+
+        // Reseta estado do player para permitir nova partida
+        this.isAlive         = true;
+        this.isSpectating    = false;
+        this.playerData      = { x: 0, y: 0, speed: 160, hp: 100 };
+        this.lastDamageTime  = 0;
+        this.spectateTargetId = '';
+
+        // Desconecta da rede
+        this.multiplayer.destroy();
+
+        // Avisa o React para voltar ao menu
+        EventBus.emit('session-end');
+    }
+
     private handleVoteResolved(staying: string[]) {
-        if (!staying.includes(this.myId)) { this.multiplayer.destroy(); EventBus.emit('session-end'); }
+        if (!staying.includes(this.myId)) {
+            this.endSession();
+        }
     }
 
     private handleVoteRestart(staying: string[]) {
         this.multiplayer.broadcast('vote-resolved', { staying });
-        this.time.delayedCall(400, () => { this.multiplayer.broadcast('game-restart', {}); this.restartGame(); });
+        this.time.delayedCall(400, () => {
+            this.multiplayer.broadcast('game-restart', {});
+            this.restartGame();
+        });
     }
 
     private restartGame() {
-        this.horde.destroy(); this.zombies.removeAll(); this.score.reset();
-        this.isConnecting = false;
-        this.playerData   = { x: 0, y: 0, speed: 160, hp: 100 };
-        this.isAlive = true; this.isSpectating = false; this.lastDamageTime = 0; this.spectateTargetId = '';
-        this.ammo = MAG_SIZE; this.isReloading = false;
+        this.horde.destroy();
+        this.zombies.removeAll();
+        this.score.reset();
+        this.isConnecting    = false;
+        this.sessionEnded    = false;
+        this.playerData      = { x: 0, y: 0, speed: 160, hp: 100 };
+        this.isAlive         = true;
+        this.isSpectating    = false;
+        this.lastDamageTime  = 0;
+        this.spectateTargetId = '';
+        this.ammo            = MAG_SIZE;
+        this.isReloading     = false;
         this.reloadTimer?.remove(); this.reloadTimer = null;
         this.localPlayer.setVisible(true).setActive(true);
         (this.localPlayer.body as Phaser.Physics.Arcade.Body).enable = true;
@@ -774,75 +766,33 @@ export class Game extends Scene {
     }
 
     // =========================================================================
-    // Input — Movimento relativo ao aim
+    // Input — mira e movimento
     // =========================================================================
 
-    /**
-     * aimAtPointer():
-     *   Calcula o ângulo entre o player e o cursor no espaço CARTESIANO do mundo.
-     *
-     *   Lógica:
-     *     1. O cursor está em espaço de tela (ISO).
-     *     2. Convertemos para coordenadas de mundo ISO usando getWorldPoint().
-     *     3. Convertemos ISO→cartesiano para obter o vetor de mira cartesiano.
-     *     4. aimAngleCart = atan2(dy_cart, dx_cart)
-     *
-     *   Esse ângulo é usado tanto para:
-     *     - Rotacionar o sprite (via isoToCartesian do ângulo → ISO)
-     *     - Mover o player com WASD relativo à frente
-     */
     private aimAtPointer() {
         const ptr   = this.input.activePointer;
         const world = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
-
-        // Posição do player em ISO
         const { isoX: px, isoY: py } = cartesianToIso(this.playerData.x, this.playerData.y);
-
-        // Vetor ISO do player ao cursor
         const dIsoX = world.x - px;
         const dIsoY = world.y - py;
-
-        // Converte vetor ISO → cartesiano:
-        //   isoX = cartX - cartY  → cartX - cartY = dIsoX
-        //   isoY = (cartX+cartY)/2 → cartX + cartY = 2*dIsoY
-        //   → cartX = (dIsoX + 2*dIsoY) / 2
-        //   → cartY = (2*dIsoY - dIsoX) / 2
+        // ISO → cartesiano
         const dCartX = (dIsoX + 2 * dIsoY) / 2;
         const dCartY = (2 * dIsoY - dIsoX) / 2;
-
         this.aimAngleCart = Math.atan2(dCartY, dCartX);
 
-        // Rotaciona o sprite: converte ângulo cartesiano → vetor ISO → atan2
-        // O sprite aponta para o cano (gun) que está em (9,0) antes da rotação.
-        // setRotation recebe radianos no espaço de tela do container.
-        // Como o container está em espaço ISO achatado (scaleY não aplicado aqui),
-        // calculamos o ângulo ISO equivalente:
+        // Converte ângulo cartesiano → ângulo ISO para rotação do sprite
         const cosA = Math.cos(this.aimAngleCart);
         const sinA = Math.sin(this.aimAngleCart);
-        // Vetor unitário cartesiano → projeta em ISO
-        const isoVx = cosA - sinA;          // isoX = cartX - cartY
-        const isoVy = (cosA + sinA) / 2;    // isoY = (cartX+cartY)/2
+        const isoVx = cosA - sinA;
+        const isoVy = (cosA + sinA) / 2;
         this.localPlayer.setRotation(Math.atan2(isoVy, isoVx));
     }
 
-    /**
-     * processMovement():
-     *   W = avança na direção cartesiana que o player está mirando
-     *   S = recua (oposto ao aim)
-     *   A = strafe esquerda (perpendicular ao aim, 90° anti-horário)
-     *   D = strafe direita (perpendicular ao aim, 90° horário)
-     *
-     *   Tudo em coordenadas cartesianas para evitar distorções de projeção.
-     */
     private processMovement(delta: number) {
         const a = this.aimAngleCart;
-
-        // Vetor "frente" cartesiano (direção do aim)
-        const fwdX =  Math.cos(a);
-        const fwdY =  Math.sin(a);
-        // Vetor "direita" cartesiano (perpendicular horário)
-        const rgtX =  Math.sin(a);
-        const rgtY = -Math.cos(a);
+        // Frente e strafe em coordenadas cartesianas
+        const fwdX =  Math.cos(a), fwdY =  Math.sin(a);
+        const rgtX =  Math.sin(a), rgtY = -Math.cos(a);
 
         let mx = 0, my = 0;
         if (this.wasd?.W?.isDown) { mx += fwdX; my += fwdY; }
@@ -851,7 +801,6 @@ export class Game extends Scene {
         if (this.wasd?.D?.isDown) { mx += rgtX; my += rgtY; }
 
         this.isMoving = mx !== 0 || my !== 0;
-
         if (this.isMoving) {
             const len = Math.hypot(mx, my);
             const dt  = delta / 1000;
@@ -868,27 +817,15 @@ export class Game extends Scene {
         const now = this.time.now;
         if (now - this.lastShootTime < SHOOT_COOLDOWN) return;
         this.lastShootTime = now;
-
         if (this.ammo <= 0 || this.isReloading) {
             if (!this.isReloading) { this.audio.emptyClick(); this.startReload(); }
             return;
         }
-
         this.ammo--; this.emitAmmoState(); this.audio.shoot();
-
-        // Ângulo ISO do disparo: mesmo que o sprite usa
-        const cosA = Math.cos(this.aimAngleCart);
-        const sinA = Math.sin(this.aimAngleCart);
-        const isoVx = cosA - sinA;
-        const isoVy = (cosA + sinA) / 2;
-        const bulletAngle = Math.atan2(isoVy, isoVx);
-
+        const cosA = Math.cos(this.aimAngleCart), sinA = Math.sin(this.aimAngleCart);
+        const bulletAngle = Math.atan2((cosA + sinA) / 2, cosA - sinA);
         this.createBullet(this.playerData.x, this.playerData.y, bulletAngle, true, this.myId);
-        this.multiplayer.broadcast('player-shoot', {
-            x: this.playerData.x, y: this.playerData.y,
-            angle: bulletAngle, shooterId: this.myId,
-        });
-
+        this.multiplayer.broadcast('player-shoot', { x: this.playerData.x, y: this.playerData.y, angle: bulletAngle, shooterId: this.myId });
         if (this.ammo === 0) this.time.delayedCall(300, () => this.startReload());
     }
 
