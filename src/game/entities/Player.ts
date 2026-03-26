@@ -1,4 +1,4 @@
-import { createPlayerFrames } from './Characterrenderer';
+import { createPlayerFrames } from './CharacterRenderer';
 import { CharacterAnimator } from './CharacterAnimator';
 
 /**

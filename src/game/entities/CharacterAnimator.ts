@@ -1,4 +1,4 @@
-import { CharacterFrameSet, Dir8, angleToDir8, radToDeg } from './Characterrenderer';
+import { CharacterFrameSet, Dir8, angleToDir8, radToDeg } from './CharacterRenderer';
 
 /**
  * CharacterAnimator — gerencia qual frame mostrar baseado em:

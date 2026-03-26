@@ -1,5 +1,5 @@
 import { cartesianToIso } from '../utils/IsoMath';
-import { createZombieFrames, angleToDir8, radToDeg } from './Characterrenderer';
+import { createZombieFrames, angleToDir8, radToDeg } from './CharacterRenderer';
 import { CharacterAnimator } from './CharacterAnimator';
 
 export interface PlayerPosition {
