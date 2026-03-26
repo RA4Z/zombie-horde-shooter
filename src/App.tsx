@@ -35,10 +35,7 @@ function AmmoDisplay({ ammo, max, reloading }: { ammo: number; max: number; relo
             ) : (
                 <div className="hud-ammo-bullets">
                     {Array.from({ length: max }).map((_, i) => (
-                        <div
-                            key={i}
-                            className={`hud-ammo-bullet ${i < ammo ? 'full' : 'empty'}`}
-                        />
+                        <div key={i} className={`hud-ammo-bullet ${i < ammo ? 'full' : 'empty'}`} />
                     ))}
                 </div>
             )}
@@ -187,10 +184,10 @@ function LeaderboardScreen({ scores, vote, onVote }: {
     scores: PlayerScore[]; vote: VoteState | null; onVote: (c: VoteChoice) => void;
 }) {
     const [myVote, setMyVote] = useState<VoteChoice | null>(null);
-    const timeLeft     = vote?.timeLeft ?? 30;
-    const totalVotes   = vote ? Object.keys(vote.votes).length : 0;
-    const totalPlayers = vote?.totalPlayers ?? 1;
-    const timerPct     = timeLeft / 30;
+    const timeLeft      = vote?.timeLeft ?? 30;
+    const totalVotes    = vote ? Object.keys(vote.votes).length : 0;
+    const totalPlayers  = vote?.totalPlayers ?? 1;
+    const timerPct      = timeLeft / 30;
     const circumference = 2 * Math.PI * 18;
 
     const handleVote = (c: VoteChoice) => { setMyVote(c); onVote(c); };
@@ -257,9 +254,10 @@ function LeaderboardScreen({ scores, vote, onVote }: {
 // ─── Menu principal ───────────────────────────────────────────────────────────
 
 function MainMenu() {
-    const [joinKey, setJoinKey] = useState('');
-    const [loading, setLoading] = useState(false);
-    const [error, setError]     = useState('');
+    const [playerName, setPlayerName] = useState('');
+    const [joinKey,    setJoinKey]    = useState('');
+    const [loading,    setLoading]    = useState(false);
+    const [error,      setError]      = useState('');
 
     useEffect(() => {
         const onErr = (d: { reason: string }) => {
@@ -270,12 +268,18 @@ function MainMenu() {
         return () => { EventBus.removeListener('connection-error-ui', onErr); };
     }, []);
 
-    const host = () => { setLoading(true); setError(''); EventBus.emit('start-game', { isHost: true }); };
+    const name = playerName.trim() || 'Player';
+
+    const host = () => {
+        setLoading(true); setError('');
+        EventBus.emit('start-game', { isHost: true, name });
+    };
+
     const join = () => {
         const k = joinKey.trim();
         if (!k) { setError('Cole a chave do host antes de entrar.'); return; }
         setLoading(true); setError('');
-        EventBus.emit('start-game', { isHost: false, roomId: k });
+        EventBus.emit('start-game', { isHost: false, roomId: k, name });
     };
 
     return (
@@ -287,24 +291,60 @@ function MainMenu() {
             {loading ? (
                 <>
                     <div className="menu-loading">Conectando…</div>
-                    <button className="btn-secondary" style={{ marginTop: 8, width: 160, fontSize: 12 }}
-                        onClick={() => { setLoading(false); EventBus.emit('cancel-connect'); }}>
+                    <button
+                        className="btn-secondary"
+                        style={{ marginTop: 8, width: 160, fontSize: 12 }}
+                        onClick={() => { setLoading(false); EventBus.emit('cancel-connect'); }}
+                    >
                         Cancelar
                     </button>
                 </>
             ) : (
                 <>
-                    <button className="btn-primary" onClick={host}>CRIAR SALA (HOST)</button>
+                    {/* ── Campo de nome ─────────────────────────────────── */}
+                    <div style={{ width: 270, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <label style={{
+                            fontSize: 10, color: '#555', letterSpacing: '1.5px',
+                            textTransform: 'uppercase', fontFamily: 'monospace',
+                        }}>
+                            Seu nome
+                        </label>
+                        <input
+                            className="menu-input"
+                            value={playerName}
+                            onChange={e => setPlayerName(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && host()}
+                            placeholder="Player"
+                            maxLength={16}
+                            spellCheck={false}
+                            autoComplete="off"
+                            autoFocus
+                            style={{ fontFamily: 'inherit', fontSize: 14 }}
+                        />
+                    </div>
+
+                    {/* ── Criar sala ────────────────────────────────────── */}
+                    <button className="btn-primary" onClick={host}>
+                        CRIAR SALA (HOST)
+                    </button>
+
                     <div className="menu-or"><span>ou</span></div>
+
+                    {/* ── Entrar na sessão ──────────────────────────────── */}
                     <input
                         className="menu-input"
                         value={joinKey}
                         onChange={e => setJoinKey(e.target.value)}
                         onKeyDown={e => e.key === 'Enter' && join()}
                         placeholder="Cole a chave do host aqui"
-                        maxLength={64} spellCheck={false} autoComplete="off"
+                        maxLength={64}
+                        spellCheck={false}
+                        autoComplete="off"
                     />
-                    <button className="btn-secondary" onClick={join}>ENTRAR NA SESSÃO</button>
+                    <button className="btn-secondary" onClick={join}>
+                        ENTRAR NA SESSÃO
+                    </button>
+
                     {error && <p className="menu-error">⚠ {error}</p>}
                 </>
             )}
@@ -360,6 +400,8 @@ export default function App() {
                 setScreen('game'); setHp(100); setSpect(false); setVote(null);
                 setAmmo(12); setReload(false);
             },
+            // Quando o player revive, sai do modo espectador no React também
+            'player-revived':   () => setSpect(false),
         };
 
         Object.entries(handlers).forEach(([ev, fn]) => EventBus.on(ev, fn));

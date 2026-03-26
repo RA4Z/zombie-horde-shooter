@@ -1,64 +1,55 @@
 /**
- * Entidade Player — funciona tanto para o jogador local quanto remotos.
+ * Entidade Player — local e remoto.
  *
- * FIX: Label com o nome do jogador é adicionada FORA do container rotacionável,
- * diretamente na cena, e segue a posição do player a cada frame sem girar.
+ * Label de nome: branco, fonte pequena não-pixelada, fora do container.
  */
 export class Player extends Phaser.GameObjects.Container {
     private bodyRect: Phaser.GameObjects.Rectangle;
-    private gun: Phaser.GameObjects.Rectangle;
-
-    // Label de nome — fica FORA do container para não rotacionar
     private nameLabel: Phaser.GameObjects.Text;
 
-    // Dimensões do losango do personagem (mundo isométrico)
-    static readonly BODY_SIZE = 20;
-    static readonly DRAW_SIZE = 22;
+    static readonly BODY_SIZE = 10;
+    static readonly DRAW_SIZE = 12;
 
     constructor(scene: Phaser.Scene, x: number, y: number, isLocal: boolean) {
         super(scene, x, y);
 
-        // Sombra no chão
-        const shadow = scene.add.ellipse(0, 6, 28, 12, 0x000000, 0.35);
+        const shadow = scene.add.ellipse(0, 4, 16, 7, 0x000000, 0.4);
 
-        // Corpo: losango isométrico
         this.bodyRect = scene.add.rectangle(
             0, 0,
             Player.DRAW_SIZE, Player.DRAW_SIZE,
             isLocal ? 0x00ff66 : 0x4499ff,
         ).setAngle(45);
 
-        // Detalhe no centro do corpo
-        const detail = scene.add.rectangle(0, 0, 8, 8, isLocal ? 0x00cc44 : 0x2266cc).setAngle(45);
+        const detail = scene.add.rectangle(0, 0, 5, 5, isLocal ? 0x00cc44 : 0x2266cc).setAngle(45);
 
-        // Cano da arma
-        this.gun = scene.add.rectangle(14, 0, 18, 4, 0xdd3333).setOrigin(0, 0.5);
+        // Cano da arma — aponta para direita (angle=0) por padrão
+        const gun = scene.add.rectangle(9, 0, 11, 3, 0xdd3333).setOrigin(0, 0.5);
 
-        this.add([shadow, this.bodyRect, detail, this.gun]);
+        this.add([shadow, this.bodyRect, detail, gun]);
 
         scene.add.existing(this);
         scene.physics.add.existing(this);
 
-        // Hitbox física achatada — isométrico 2:1
         const body = this.body as Phaser.Physics.Arcade.Body;
         body.setSize(Player.BODY_SIZE * 2, Player.BODY_SIZE);
         body.setOffset(-Player.BODY_SIZE, -Player.BODY_SIZE / 2);
 
-        // FIX: Label de nome criada diretamente na cena (não no container)
-        // para que nunca gire com o player. Começa vazia; usa setNameLabel().
-        this.nameLabel = scene.add.text(x, y - 28, '', {
-            fontFamily: 'monospace',
+        // ── Label de nome fora do container (não gira) ──────────────────────
+        // Usa Arial para evitar pixelação; branco; tamanho pequeno
+        this.nameLabel = scene.add.text(x, y - 20, '', {
+            fontFamily: 'Arial, sans-serif',
             fontSize:   '11px',
-            color:      isLocal ? '#00ff99' : '#88ccff',
+            fontStyle:  'bold',
+            color:      '#ffffff',
             stroke:     '#000000',
-            strokeThickness: 3,
-            align: 'center',
+            strokeThickness: 2,
+            resolution: 2,     // renderiza em 2× para evitar pixelação
         })
         .setOrigin(0.5, 1)
-        .setDepth(999990); // sempre acima de tudo exceto HUD
+        .setDepth(999990);
     }
 
-    /** Define o nome exibido acima do jogador */
     setNameLabel(name: string) {
         this.nameLabel.setText(name);
     }
@@ -67,24 +58,17 @@ export class Player extends Phaser.GameObjects.Container {
         this.bodyRect.setFillStyle(color);
     }
 
-    /**
-     * FIX: Sobrescreve setPosition para manter a label sincronizada.
-     * Também é chamado via Tween nos players remotos.
-     */
+    /** Mantém o label alinhado quando a posição muda (tweens inclusive) */
     setPosition(x?: number, y?: number, z?: number, w?: number): this {
         super.setPosition(x, y, z, w);
-        if (this.nameLabel) {
-            this.nameLabel.setPosition(this.x, this.y - 28);
-        }
+        this.nameLabel?.setPosition(this.x, this.y - 20);
         return this;
     }
 
-    /** Garante que a label acompanha o player a cada frame (para tweens remotos) */
-    preUpdate(_time: number, _delta: number) {
-        if (this.nameLabel) {
-            this.nameLabel.setPosition(this.x, this.y - 28);
-            this.nameLabel.setVisible(this.visible);
-        }
+    setVisible(value: boolean): this {
+        super.setVisible(value);
+        this.nameLabel?.setVisible(value);
+        return this;
     }
 
     destroy(fromScene?: boolean) {
