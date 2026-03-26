@@ -92,7 +92,7 @@ export class CharacterAnimator {
     flashHit() {
         const frames = this.frameSet.frames[this.currentDir];
         const gfx = frames[this.currentFrame].gfx as any;
-        gfx.setTint(0xff4422);
+        // gfx.setTint(0xff4422);
         this.scene.time.delayedCall(90, () => {
             if (gfx && gfx.active) gfx.clearTint();
         });
