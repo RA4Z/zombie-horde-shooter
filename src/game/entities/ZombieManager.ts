@@ -8,33 +8,27 @@ export interface PlayerPosition {
     y: number;
 }
 
-/**
- * ZombieManager — spawn, HP, movimento e animação direcional dos zumbis.
- *
- * FIX 1 — Hitbox: aumentada para cobrir o corpo inteiro do zumbi (18×28).
- * FIX 2 — Seguir player: buildAlivePlayerList() já passa coordenadas
- *          cartesianas; a conversão isoToCartesian foi removida daqui para
- *          evitar double-conversion. O alvo é calculado em ISO igual ao
- *          zombie.x/y, convertendo px/py também para ISO antes de comparar.
- */
 export class ZombieManager {
     readonly group: Phaser.Physics.Arcade.Group;
     readonly zombiesMap: Map<string, Phaser.GameObjects.Container> = new Map();
 
-    private hpMap: Map<string, number> = new Map();
-    private animMap: Map<string, CharacterAnimator> = new Map();
-    private lastPos: Map<string, { x: number; y: number; t: number }> = new Map();
-    private stuckUntil: Map<string, number> = new Map();
+    private hpMap:      Map<string, number>            = new Map();
+    private animMap:    Map<string, CharacterAnimator> = new Map();
+    private lastPos:    Map<string, { x: number; y: number; t: number }> = new Map();
+    private stuckUntil: Map<string, number>            = new Map();
     private stuckDelta: Map<string, { vx: number; vy: number }> = new Map();
-    private moveAngle: Map<string, number> = new Map();
+    private moveAngle:  Map<string, number>            = new Map();
 
-    // FIX: hitbox agora cobre o corpo inteiro (largura 18, altura 28)
+    // Hitbox cobre o corpo inteiro
     private static readonly BODY_W = 18;
     private static readonly BODY_H = 28;
-    private static readonly SPEED = 90;
-    private static readonly STUCK_CHECK_MS = 600;
-    private static readonly STUCK_THRESHOLD = 4;
-    private static readonly STUCK_EVADE_MS = 800;
+
+    // Comportamento agressivo
+    private static readonly SPEED           = 145;  // bem mais rápido que antes (era 90)
+    private static readonly SPEED_SPRINT    = 195;  // sprint ao levar hit
+    private static readonly STUCK_CHECK_MS  = 300;  // detecta stuck mais rápido (era 600)
+    private static readonly STUCK_THRESHOLD = 2;    // threshold menor (era 4)
+    private static readonly STUCK_EVADE_MS  = 450;  // evasão curta para retomar perseguição logo
 
     constructor(private scene: Phaser.Scene) {
         this.group = scene.physics.add.group();
@@ -45,20 +39,18 @@ export class ZombieManager {
 
         const { isoX, isoY } = cartesianToIso(worldX, worldY);
 
-        const wrapper = this.scene.add.container(isoX, isoY);
-
+        const wrapper  = this.scene.add.container(isoX, isoY);
         const frameSet = createZombieFrames(this.scene);
         const animator = new CharacterAnimator(this.scene, frameSet, wrapper);
         this.animMap.set(id, animator);
 
         this.scene.physics.add.existing(wrapper);
         const phys = wrapper.body as Phaser.Physics.Arcade.Body;
-
-        // FIX: hitbox cobre corpo inteiro — offsetY ajustado para centrar verticalmente
         phys.setSize(ZombieManager.BODY_W, ZombieManager.BODY_H);
         phys.setOffset(-ZombieManager.BODY_W / 2, -ZombieManager.BODY_H + 4);
         phys.setCollideWorldBounds(false);
-        phys.setBounce(0.1);
+        phys.setBounce(0);
+        phys.setMaxVelocity(ZombieManager.SPEED_SPRINT, ZombieManager.SPEED_SPRINT);
 
         this.group.add(wrapper);
         this.zombiesMap.set(id, wrapper);
@@ -66,9 +58,10 @@ export class ZombieManager {
         this.moveAngle.set(id, 0);
         this.lastPos.set(id, { x: isoX, y: isoY, t: Date.now() });
 
-        wrapper.setData('maxHp', hp);
-        wrapper.setData('hpFrac', 1);
-        wrapper.setData('animId', id);
+        wrapper.setData('maxHp',     hp);
+        wrapper.setData('animId',    id);
+        // 30% dos zumbis já nascem em modo sprint
+        wrapper.setData('sprinting', Math.random() < 0.3);
 
         return wrapper;
     }
@@ -82,12 +75,13 @@ export class ZombieManager {
         const zombie = this.zombiesMap.get(id);
         if (zombie) {
             const maxHp = zombie.getData('maxHp') as number;
-            const frac = Math.max(0, next / maxHp);
-            const anim = this.animMap.get(id);
+            const anim  = this.animMap.get(id);
             if (anim) {
-                anim.setHpFraction(frac);
+                anim.setHpFraction(Math.max(0, next / maxHp));
                 anim.flashHit();
             }
+            // Levar hit faz o zumbi enfurecer
+            zombie.setData('sprinting', true);
         }
         return next <= 0;
     }
@@ -117,10 +111,8 @@ export class ZombieManager {
     }
 
     /**
-     * Host: move zumbis em direção ao alvo + atualiza animação direcional.
-     *
-     * FIX: players[].x/y são coordenadas CARTESIANAS (vindas de playerData.x/y).
-     * Convertemos para ISO aqui antes de comparar com zombie.x/y (que já estão em ISO).
+     * Host: perseguição agressiva com anti-stuck melhorado.
+     * players[].x/y são CARTESIANOS — convertidos para ISO antes de usar.
      */
     updateHost(players: PlayerPosition[], delta = 16) {
         const now = Date.now();
@@ -130,12 +122,11 @@ export class ZombieManager {
 
             if (players.length === 0) {
                 phys.setVelocity(0, 0);
-                const anim = this.animMap.get(id);
-                anim?.update(delta, false, this.moveAngle.get(id) ?? 0);
+                this.animMap.get(id)?.update(delta, false, this.moveAngle.get(id) ?? 0);
                 return;
             }
 
-            // FIX: converte posição do player de cartesiano para ISO antes de calcular distância
+            // Alvo mais próximo (cartesiano → ISO)
             let tx = 0, ty = 0, minDist = Infinity;
             for (const p of players) {
                 const { isoX: px, isoY: py } = cartesianToIso(p.x, p.y);
@@ -143,36 +134,21 @@ export class ZombieManager {
                 if (d < minDist) { minDist = d; tx = px; ty = py; }
             }
 
-            const dx = tx - zombie.x, dy = ty - zombie.y;
-            const dist = Math.hypot(dx, dy);
+            const isSprinting = zombie.getData('sprinting') as boolean;
+            const speed = isSprinting ? ZombieManager.SPEED_SPRINT : ZombieManager.SPEED;
 
-            let vx = 0, vy = 0, isMoving = false;
-
-            if (now < (this.stuckUntil.get(id) ?? 0)) {
-                // Evasão ativa
-                const sd = this.stuckDelta.get(id)!;
-                vx = sd.vx; vy = sd.vy; isMoving = true;
-            } else if (dist > 4) {
-                // Direção ao player
-                vx = (dx / dist) * ZombieManager.SPEED;
-                vy = (dy / dist) * ZombieManager.SPEED;
-                isMoving = true;
-            }
-
-            // Verifica stuck com threshold menor (2px) para detectar mais rápido
+            // ── Anti-stuck ───────────────────────────────────────────────
             const lp = this.lastPos.get(id);
             if (lp && (now - lp.t) >= ZombieManager.STUCK_CHECK_MS) {
                 const moved = Math.hypot(zombie.x - lp.x, zombie.y - lp.y);
-                if (moved < 2 && isMoving) { // stuck!
-                    // Tenta 3 ângulos de evasão e escolhe o mais diferente da parede
-                    const baseAngle = Math.atan2(dy, dx);
-                    const offsets = [1.0, -1.0, 1.6, -1.6, Math.PI * 0.8];
-                    const evadeOff = offsets[Math.floor(Math.random() * offsets.length)];
-                    const evadeAngle = baseAngle + evadeOff;
+                if (moved < ZombieManager.STUCK_THRESHOLD) {
+                    const baseAngle  = Math.atan2(ty - zombie.y, tx - zombie.x);
+                    const offsets    = [0.9, -0.9, 1.6, -1.6, Math.PI * 0.6];
+                    const evadeAngle = baseAngle + offsets[Math.floor(Math.random() * offsets.length)];
                     this.stuckUntil.set(id, now + ZombieManager.STUCK_EVADE_MS);
                     this.stuckDelta.set(id, {
-                        vx: Math.cos(evadeAngle) * ZombieManager.SPEED * 1.2,
-                        vy: Math.sin(evadeAngle) * ZombieManager.SPEED * 1.2,
+                        vx: Math.cos(evadeAngle) * speed * 1.3,
+                        vy: Math.sin(evadeAngle) * speed * 1.3,
                     });
                 }
                 this.lastPos.set(id, { x: zombie.x, y: zombie.y, t: now });
@@ -180,22 +156,45 @@ export class ZombieManager {
                 this.lastPos.set(id, { x: zombie.x, y: zombie.y, t: now });
             }
 
+            // ── Velocidade ───────────────────────────────────────────────
+            let vx = 0, vy = 0, isMoving = false;
+
+            if (now < (this.stuckUntil.get(id) ?? 0)) {
+                const sd = this.stuckDelta.get(id)!;
+                vx = sd.vx; vy = sd.vy; isMoving = true;
+            } else {
+                const dx   = tx - zombie.x;
+                const dy   = ty - zombie.y;
+                const dist = Math.hypot(dx, dy);
+
+                if (dist > 2) {
+                    vx = (dx / dist) * speed;
+                    vy = (dy / dist) * speed;
+                    isMoving = true;
+
+                    // Jitter lateral pequeno — movimento parece mais caótico
+                    // e evita que todos se empilhem na mesma linha
+                    const jitter = (Math.random() - 0.5) * 20;
+                    vx += (-dy / dist) * jitter;
+                    vy += ( dx / dist) * jitter;
+                }
+            }
+
             phys.setVelocity(vx, vy);
 
+            // ── Animação ─────────────────────────────────────────────────
             const angle = isMoving ? Math.atan2(vy, vx) : (this.moveAngle.get(id) ?? 0);
             if (isMoving) this.moveAngle.set(id, angle);
-
-            const anim = this.animMap.get(id);
-            anim?.update(delta, isMoving, angle);
+            this.animMap.get(id)?.update(delta, isMoving, angle);
 
             zombie.setDepth(zombie.y);
         });
     }
 
     /**
-     * Cliente: interpola posições recebidas do host + atualiza animação.
+     * Cliente: interpola posições recebidas do host.
      */
-    interpolateClient(lerpFactor = 0.15, delta = 16) {
+    interpolateClient(lerpFactor = 0.18, delta = 16) {
         this.zombiesMap.forEach((zombie, id) => {
             const tx: number | undefined = zombie.getData('targetX');
             const ty: number | undefined = zombie.getData('targetY');
@@ -213,9 +212,7 @@ export class ZombieManager {
             const isMoving = dist > 0.3;
             const angle = isMoving ? Math.atan2(dy, dx) : (this.moveAngle.get(id) ?? 0);
             if (isMoving) this.moveAngle.set(id, angle);
-
-            const anim = this.animMap.get(id);
-            anim?.update(delta, isMoving, angle);
+            this.animMap.get(id)?.update(delta, isMoving, angle);
         });
     }
 
