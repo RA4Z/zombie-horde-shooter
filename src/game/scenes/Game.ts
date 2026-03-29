@@ -13,10 +13,10 @@ import { cartesianToIso, isoToCartesian } from '../utils/IsoMath';
 interface PlayerData { x: number; y: number; speed: number; hp: number; }
 
 const HOST_PLAYER_ID = '__host__';
-const MAG_SIZE        = 12;
-const RELOAD_TIME_MS  = 2200;
-const SHOOT_COOLDOWN  = 120;
-const CAMERA_ZOOM     = 2.8;
+const MAG_SIZE = 12;
+const RELOAD_TIME_MS = 2200;
+const SHOOT_COOLDOWN = 120;
+const CAMERA_ZOOM = 2.8;
 
 export class Game extends Scene {
     private localPlayer!: Player;
@@ -47,8 +47,8 @@ export class Game extends Scene {
     private myId = HOST_PLAYER_ID;
     private myName = 'Player';
 
-    private ammo         = MAG_SIZE;
-    private isReloading  = false;
+    private ammo = MAG_SIZE;
+    private isReloading = false;
     private reloadTimer: Phaser.Time.TimerEvent | null = null;
     private lastShootTime = 0;
     private isMoving = false;
@@ -83,22 +83,22 @@ export class Game extends Scene {
         window.addEventListener('beforeunload', this.onBeforeUnload);
 
         this.cityWorld = new CityWorld(this);
-        this.audio     = new AudioManager();
-        this.walls     = this.physics.add.staticGroup();
-        this.bullets   = this.physics.add.group();
-        this.zombies   = new ZombieManager(this);
+        this.audio = new AudioManager();
+        this.walls = this.physics.add.staticGroup();
+        this.bullets = this.physics.add.group();
+        this.zombies = new ZombieManager(this);
 
         this.multiplayer = new MultiplayerService();
-        this.horde       = new HordeManager();
-        this.score       = new ScoreManager();
-        this.vote        = new VoteManager();
+        this.horde = new HordeManager();
+        this.score = new ScoreManager();
+        this.vote = new VoteManager();
         this.localPlayer = new Player(this, 0, 0, true);
 
         if (this.input.keyboard) {
             this.wasd = this.input.keyboard.addKeys('W,A,S,D') as Record<string, Phaser.Input.Keyboard.Key>;
             this.reloadKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R);
             this.spectateKeys = {
-                left:  this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q),
+                left: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q),
                 right: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E),
             };
         }
@@ -125,15 +125,15 @@ export class Game extends Scene {
             callbackScope: this, loop: true, paused: true,
         });
 
-        this.horde.onSpawnZombie  = () => this.spawnZombieHost();
-        this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
+        this.horde.onSpawnZombie = () => this.spawnZombieHost();
+        this.horde.onStateChange = (state) => this.multiplayer.broadcast('horde-state', { state });
         this.horde.onWaveComplete = (wave) => {
             this.reviveDeadPlayers();
             this.score.onWaveComplete(wave);
             this.broadcastScores();
         };
 
-        this.vote.onRestart  = (staying) => this.handleVoteRestart(staying);
+        this.vote.onRestart = (staying) => this.handleVoteRestart(staying);
         this.vote.onAllLeave = () => {
             this.multiplayer.broadcast('session-end', {});
             this.endSession();
@@ -142,9 +142,16 @@ export class Game extends Scene {
         this.initHeartbeatWorker();
         this.setupNetworkEvents();
 
-        EventBus.on('start-game',       this.onStartGame,       this);
-        EventBus.on('cast-vote',        this.onCastVote,        this);
+        EventBus.on('start-game', this.onStartGame, this);
+        EventBus.on('cast-vote', this.onCastVote, this);
         EventBus.on('connection-error', this.onConnectionError, this);
+
+        EventBus.on('disable-phaser-keyboard', () => {
+            if (this.input.keyboard) this.input.keyboard.enabled = false;
+        }, this);
+        EventBus.on('enable-phaser-keyboard', () => {
+            if (this.input.keyboard) this.input.keyboard.enabled = true;
+        }, this);
 
         this.cameras.main.setZoom(CAMERA_ZOOM);
         this.cameras.main.centerOn(0, 0);
@@ -210,11 +217,13 @@ export class Game extends Scene {
         this.multiplayer.destroy();
         this.audio.destroy();
         this.cityWorldBuilt = false;
-        this.sessionEnded   = false;
-        EventBus.removeListener('start-game',        this.onStartGame);
-        EventBus.removeListener('cast-vote',         this.onCastVote);
-        EventBus.removeListener('connection-error',  this.onConnectionError);
-        EventBus.removeListener('network-data',      this.onNetworkData);
+        this.sessionEnded = false;
+        EventBus.removeListener('start-game', this.onStartGame);
+        EventBus.removeListener('disable-phaser-keyboard');
+        EventBus.removeListener('enable-phaser-keyboard');
+        EventBus.removeListener('cast-vote', this.onCastVote);
+        EventBus.removeListener('connection-error', this.onConnectionError);
+        EventBus.removeListener('network-data', this.onNetworkData);
         EventBus.removeListener('peer-disconnected', this.onPeerDisconnected);
     }
 
@@ -261,7 +270,7 @@ export class Game extends Scene {
             EventBus.emit('room-joined', key);
         } else if (data.roomId) {
             await this.multiplayer.joinGame(data.roomId);
-            this.myId   = this.multiplayer.myID;
+            this.myId = this.multiplayer.myID;
             this.hostID = data.roomId;
             this.multiplayer.broadcast('player-joined', { name: this.myName });
             this.isConnecting = false;
@@ -275,30 +284,24 @@ export class Game extends Scene {
     // =========================================================================
 
     private buildWalls() {
-        const T     = 64;
-        const BLOCK = 4;
-        const STEP  = BLOCK + 2;
-        const RANGE = 4;
+        const rects = this.cityWorld.getWallRects();
 
-        const makeRng = (seed: number) => {
-            let s = (seed ^ 0xdeadbeef) >>> 0 || 1;
-            return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s = s >>> 0; return s / 4294967296; };
-        };
+        for (const r of rects) {
+            // Centro ISO do retângulo cartesiano
+            const cx = r.x + r.w / 2;
+            const cy = r.y + r.h / 2;
+            const { isoX, isoY } = cartesianToIso(cx, cy);
 
-        for (let bx = -RANGE; bx <= RANGE; bx++) {
-            for (let by = -RANGE; by <= RANGE; by++) {
-                const ox   = bx * STEP * T;
-                const oy   = by * STEP * T;
-                const seed = bx * 137 + by * 1009;
-                const rng  = makeRng(seed);
-                const type = rng();
+            // Tamanho da hitbox em espaço ISO (aproximação plana)
+            const isoW = r.w + r.h;          // diagonal ISO
+            const isoH = (r.w + r.h) / 2;   // metade da altura ISO
 
-                if (type < 0.5) {
-                    this.addWallBlock(ox, oy, BLOCK * T, BLOCK * T);
-                }
-            }
+            const wall = this.add.rectangle(isoX, isoY, isoW, isoH, 0x000000, 0);
+            this.physics.add.existing(wall, true);
+            this.walls.add(wall);
         }
     }
+
 
     private addWallBlock(wx: number, wy: number, w: number, d: number) {
         const cx = wx + w / 2;
@@ -361,20 +364,20 @@ export class Game extends Scene {
             this.heartbeatWorker.onmessage = (e) => {
                 if (e.data !== 'tick') return;
                 if (this.isHost) this.runHostBackgroundSimulation();
-                else             this.sendClientData();
+                else this.sendClientData();
             };
         } catch { console.warn('[Game] heartbeatWorker não encontrado.'); }
         this.events.once('destroy', () => this.heartbeatWorker?.terminate());
     }
 
-    private onVisibilityChange = () => {};
+    private onVisibilityChange = () => { };
 
     // =========================================================================
     // Rede
     // =========================================================================
 
     private setupNetworkEvents() {
-        EventBus.on('network-data',      this.onNetworkData,      this);
+        EventBus.on('network-data', this.onNetworkData, this);
         EventBus.on('peer-disconnected', this.onPeerDisconnected, this);
     }
 
@@ -419,7 +422,7 @@ export class Game extends Scene {
             }
 
             case 'player-leaving': this.removePlayer(from); break;
-            case 'move':           this.handleRemoteMove(from, data); break;
+            case 'move': this.handleRemoteMove(from, data); break;
 
             case 'player-shoot':
                 this.createBullet(data.x as number, data.y as number, data.angle as number, false, data.shooterId as string);
@@ -434,7 +437,7 @@ export class Game extends Scene {
                 break;
 
             case 'zombie-death': this.audio.zombieDeath(); this.zombies.remove(data.id as string); break;
-            case 'zombie-hit':   this.audio.zombieHit();   this.zombies.hit(data.id as string);    break;
+            case 'zombie-hit': this.audio.zombieHit(); this.zombies.hit(data.id as string); break;
 
             case 'player-revived':
                 if (!this.isHost && (data.id as string) === this.myId) this.handleRevive();
@@ -448,7 +451,7 @@ export class Game extends Scene {
                 if (!this.isHost) this.score.applySnapshot(data.scores as any);
                 break;
 
-            case 'player-dead':    this.lastRemoteData.delete(from); break;
+            case 'player-dead': this.lastRemoteData.delete(from); break;
             case 'cast-vote':
                 if (this.isHost) this.vote.castVote(from, data.choice as VoteChoice);
                 break;
@@ -457,10 +460,10 @@ export class Game extends Scene {
                 if (!this.isHost) { this.vote.applyNetworkState(data as any); EventBus.emit('vote-state', data); }
                 break;
 
-            case 'vote-resolved':    this.handleVoteResolved(data.staying as string[]); break;
+            case 'vote-resolved': this.handleVoteResolved(data.staying as string[]); break;
             case 'show-leaderboard': EventBus.emit('show-leaderboard', data); break;
-            case 'session-end':      this.endSession(); break;
-            case 'game-restart':     this.restartGame(); break;
+            case 'session-end': this.endSession(); break;
+            case 'game-restart': this.restartGame(); break;
         }
     };
 
@@ -484,13 +487,13 @@ export class Game extends Scene {
         if (this.isHost) return;
         this.removePlayer(this.hostID);
         this.multiplayer.removePeer(this.hostID);
-        this.isHost  = true;
-        this.hostID  = this.multiplayer.myID;
+        this.isHost = true;
+        this.hostID = this.multiplayer.myID;
         this.multiplayer.startHostHeartbeat();
         this.networkTimer.paused = false;
         this.multiplayer.broadcast('host-migration-start', { newHostID: this.multiplayer.myID });
-        this.horde.onSpawnZombie  = () => this.spawnZombieHost();
-        this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
+        this.horde.onSpawnZombie = () => this.spawnZombieHost();
+        this.horde.onStateChange = (state) => this.multiplayer.broadcast('horde-state', { state });
         this.horde.onWaveComplete = (wave) => { this.reviveDeadPlayers(); this.score.onWaveComplete(wave); this.broadcastScores(); };
     }
 
@@ -543,13 +546,35 @@ export class Game extends Scene {
     // =========================================================================
 
     private spawnZombieHost() {
-        const id     = `z_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        const angle  = Math.random() * Math.PI * 2;
-        const worldX = this.playerData.x + Math.cos(angle) * 500;
-        const worldY = this.playerData.y + Math.sin(angle) * 500;
-        const hp     = this.horde.zombieHp;
-        this.zombies.spawn(id, worldX, worldY, hp);
-        this.multiplayer.broadcast('zombie-spawn', { id, x: worldX, y: worldY, hp });
+        const id = `z_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const hp = this.horde.zombieHp;
+
+        // Pega pontos de spawn seguros longe do player
+        const points = this.cityWorld.getSpawnPoints(
+            this.playerData.x,
+            this.playerData.y,
+            280,   // distância mínima do player
+            12,    // candidatos
+        );
+
+        let spawnX: number, spawnY: number;
+
+        if (points.length > 0) {
+            // Escolhe aleatoriamente entre os candidatos mais próximos
+            const pt = points[Math.floor(Math.random() * Math.min(points.length, 6))];
+            // Pequeno offset aleatório dentro da rua
+            spawnX = pt.x + (Math.random() - 0.5) * 80;
+            spawnY = pt.y + (Math.random() - 0.5) * 80;
+        } else {
+            // Fallback: borda fixa ao redor do player
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 350 + Math.random() * 150;
+            spawnX = this.playerData.x + Math.cos(angle) * dist;
+            spawnY = this.playerData.y + Math.sin(angle) * dist;
+        }
+
+        const zombie = this.zombies.spawn(id, spawnX, spawnY, hp);
+        this.multiplayer.broadcast('zombie-spawn', { id, x: spawnX, y: spawnY, hp });
     }
 
     private handleZombieUpdate(list: Array<{ id: string; isoX: number; isoY: number }>) {
@@ -645,7 +670,7 @@ export class Game extends Scene {
     }
 
     private updateSpectator() {
-        if (Phaser.Input.Keyboard.JustDown(this.spectateKeys.left))  this.cycleSpectateTarget(-1);
+        if (Phaser.Input.Keyboard.JustDown(this.spectateKeys.left)) this.cycleSpectateTarget(-1);
         if (Phaser.Input.Keyboard.JustDown(this.spectateKeys.right)) this.cycleSpectateTarget(1);
     }
 
@@ -712,8 +737,8 @@ export class Game extends Scene {
         this.emitAmmoState();
         if (this.isHost) {
             this.horde = new HordeManager();
-            this.horde.onSpawnZombie  = () => this.spawnZombieHost();
-            this.horde.onStateChange  = (state) => this.multiplayer.broadcast('horde-state', { state });
+            this.horde.onSpawnZombie = () => this.spawnZombieHost();
+            this.horde.onStateChange = (state) => this.multiplayer.broadcast('horde-state', { state });
             this.horde.onWaveComplete = (wave) => { this.reviveDeadPlayers(); this.score.onWaveComplete(wave); this.broadcastScores(); };
             this.horde.start();
         }
@@ -773,7 +798,7 @@ export class Game extends Scene {
      *   aimAngleCart — ângulo no espaço cartesiano (para movimento WASD relativo)
      */
     private aimAtPointer() {
-        const ptr   = this.input.activePointer;
+        const ptr = this.input.activePointer;
         const world = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
         const { isoX: px, isoY: py } = cartesianToIso(this.playerData.x, this.playerData.y);
 
@@ -793,8 +818,8 @@ export class Game extends Scene {
     /** WASD relativo ao aim em coordenadas cartesianas */
     private processMovement(delta: number) {
         const a = this.aimAngleCart;
-        const fwdX =  Math.cos(a), fwdY =  Math.sin(a);
-        const rgtX =  Math.sin(a), rgtY = -Math.cos(a);
+        const fwdX = Math.cos(a), fwdY = Math.sin(a);
+        const rgtX = Math.sin(a), rgtY = -Math.cos(a);
 
         let mx = 0, my = 0;
         if (this.wasd?.W?.isDown) { mx += fwdX; my += fwdY; }
@@ -805,7 +830,7 @@ export class Game extends Scene {
         this.isMoving = mx !== 0 || my !== 0;
         if (this.isMoving) {
             const len = Math.hypot(mx, my);
-            const dt  = delta / 1000;
+            const dt = delta / 1000;
             this.playerData.x += (mx / len) * this.playerData.speed * dt;
             this.playerData.y += (my / len) * this.playerData.speed * dt;
         }
